@@ -224,15 +224,32 @@ def _panel_formulario(
         numerico: bool = False,
         multilinea: bool = False,
     ):
-        """Crea un campo enlazado al borrador (bind_value_to no es encadenable)."""
+        """
+        Crea un campo precargado con el valor ya presente en `borrador`
+        (`_precargar_borrador`, con los nombres de columna del esquema v2:
+        numero_oficio, fecha_emision, dependencia_area, remitente_nombre,
+        remitente_cargo, destinatario_nombre, destinatario_cargo, asunto,
+        plazo_dias) y enlazado para que las ediciones del capturista se
+        reflejen de vuelta en `borrador`.
+
+        OJO: `bind_value_to` es una sincronización de UNA sola vía
+        (widget → borrador) que se dispara de inmediato al enlazar (no
+        cuando cambia `borrador`) — sin pasar `value=` al construir el
+        widget, esa sincronización inicial pisaría el dato ya precargado en
+        `borrador` con el valor vacío por defecto del widget, dejando el
+        formulario en blanco pese a que la IA sí extrajo los metadatos. Por
+        eso el valor inicial se toma explícitamente de `borrador` aquí
+        (bind_value_to no es encadenable, de ahí que no se use bind_value).
+        """
+        valor_inicial = borrador.get(clave)
         if numerico:
-            entrada = ui.number(etiqueta, placeholder=placeholder, min=0, step=1, precision=0)
+            entrada = ui.number(etiqueta, value=valor_inicial, placeholder=placeholder, min=0, step=1, precision=0)
             entrada.props("dense outlined color=primary")
         elif multilinea:
-            entrada = ui.textarea(etiqueta, placeholder=placeholder, validation=validador)
+            entrada = ui.textarea(etiqueta, value=valor_inicial or "", placeholder=placeholder, validation=validador)
             entrada.props("dense outlined color=primary autogrow")
         else:
-            entrada = ui.input(etiqueta, placeholder=placeholder, validation=validador)
+            entrada = ui.input(etiqueta, value=valor_inicial or "", placeholder=placeholder, validation=validador)
             entrada.props("dense outlined color=primary")
         entrada.classes("w-full")
         entrada.bind_value_to(borrador, clave)
@@ -270,9 +287,10 @@ def _panel_formulario(
             _campo("asunto", "Asunto (síntesis de 1 a 3 oraciones)", validador=_validar_asunto, multilinea=True)
             _campo("plazo_dias", "Plazo de respuesta (días)", placeholder="Vacío si no aplica", numerico=True)
 
-            ui.switch("Contiene datos personales sensibles (LGPDPPSO)").props(
-                "color=negative"
-            ).bind_value_to(borrador, "contiene_datos_sensibles")
+            ui.switch(
+                "Contiene datos personales sensibles (LGPDPPSO)",
+                value=borrador.get("contiene_datos_sensibles", False),
+            ).props("color=negative").bind_value_to(borrador, "contiene_datos_sensibles")
 
             # ---- Acciones ----
             ui.separator().classes("w-full")
