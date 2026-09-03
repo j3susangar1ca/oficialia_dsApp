@@ -58,7 +58,7 @@ MESES_ES: dict[str, int] = {
 #: Texto de "asunto" — deliberadamente visible/alarmante: es lo primero
 #: que el revisor lee en la pantalla HITL para este documento.
 ASUNTO_MARCADOR = (
-    "EXTRACCIÓN HEURÍSTICA DE RESPALDO (LA IA NO ESTABA DISPONIBLE): "
+    "EXTRACCIÓN HEURÍSTICA DE RESPALDO — REQUIERE REVISIÓN COMPLETA: "
     "VERIFIQUE Y COMPLETE MANUALMENTE TODOS LOS CAMPOS DE ESTE FORMULARIO "
     "ANTES DE CONFIRMAR."
 )

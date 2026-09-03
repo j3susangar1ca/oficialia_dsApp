@@ -19,7 +19,7 @@ Migración del `HitlReviewView.svelte` original:
     - Atajos seguros: Alt+A confirma y Alt+R abre el descarte, sin interferir
       con la captura dentro de los campos del formulario.
     - Mientras el documento está EJECUTANDO_RPA, la página se auto-refresca
-      para mostrar el desenlace sin intervención del capturista.
+      para mostrar el desenlace sin intervención manual.
 """
 
 from __future__ import annotations
@@ -30,7 +30,15 @@ from typing import Any, Callable, Optional
 from nicegui import run, ui
 
 from core.models import DocumentoRegistro, EstadoDocumento, MetadatosOficio, MetodoExtraccion, meta_estado
-from ui.layout import aplicar_tema, encabezado, obtener_config, obtener_pipeline, tiempo_relativo
+from ui.layout import (
+    REVISOR_POR_DEFECTO,
+    aplicar_tema,
+    encabezado,
+    estilo_badge,
+    obtener_config,
+    obtener_pipeline,
+    tiempo_relativo,
+)
 
 logger = logging.getLogger("oficialia.ui.hitl")
 
@@ -81,7 +89,7 @@ def _validar_asunto(valor: str) -> Optional[str]:
 def pagina_revision(doc_id: str) -> None:
     """Split-screen: visor de PDF (izquierda) + formulario HITL (derecha)."""
     aplicar_tema()
-    capturista: dict = {"valor": "CAPTURISTA-DEV"}
+    revisor: dict = {"valor": ""}
     pipeline = obtener_pipeline()
     config = obtener_config()
 
@@ -96,14 +104,17 @@ def pagina_revision(doc_id: str) -> None:
     estado_visto: dict = {"estado": documento.estado}
 
     # El encabezado es un layout de primer nivel (fuera del contenedor).
-    encabezado(capturista)
+    encabezado(revisor)
 
     with ui.column().classes("w-full no-wrap q-pa-md gap-3").style(
         "height: calc(100vh - 48px)"
     ):
 
         # ---------------- Barra de contexto del documento ----------------
-        with ui.row().classes("w-full items-center justify-between no-wrap gap-3"):
+        with ui.row().classes(
+            "w-full items-center justify-between no-wrap gap-3 bg-white rounded-xl border "
+            "border-slate-200 q-pa-sm"
+        ):
             with ui.row().classes("items-center gap-3 no-wrap min-w-0"):
                 ui.button(icon="arrow_back").props("flat round dense color=primary").on_click(
                     lambda: ui.navigate.to("/")
@@ -114,7 +125,9 @@ def pagina_revision(doc_id: str) -> None:
                     ).style("max-width:420px")
                     with ui.row().classes("items-center gap-2 no-wrap"):
                         info = meta_estado(documento.estado)
-                        ui.badge(info.etiqueta).props(f"color={info.color}")
+                        ui.label(info.etiqueta).classes(
+                            "rounded-full px-2.5 py-0.5 text-[11px] font-medium"
+                        ).style(estilo_badge(info.color))
                         ui.label(f"Ingresado {tiempo_relativo(documento.fecha_ingesta)}").classes(
                             "text-[11px] text-slate-400"
                         )
@@ -127,7 +140,9 @@ def pagina_revision(doc_id: str) -> None:
 
         # El PDF recibe más espacio, mientras el panel lateral conserva un
         # ancho cómodo para validar sin desplazamiento horizontal.
-        with ui.splitter(value=58).classes("w-full flex-1 min-h-0 rounded-lg border border-slate-200").props("limits=38,68") as split:
+        with ui.splitter(value=58).classes(
+            "w-full flex-1 min-h-0 rounded-xl border border-slate-200 overflow-hidden"
+        ).props("limits=38,68") as split:
             # ==== PANEL IZQUIERDO: visor de PDF ====
             with split.before:
                 _panel_visor(documento)
@@ -135,7 +150,7 @@ def pagina_revision(doc_id: str) -> None:
             # ==== PANEL DERECHO: formulario + acciones ====
             with split.after:
                 acciones = _panel_formulario(
-                    documento, borrador, capturista, estado_visto, pipeline, config
+                    documento, borrador, revisor, estado_visto, pipeline, config
                 )
 
     async def _atajo_revision(evento) -> None:
@@ -148,11 +163,11 @@ def pagina_revision(doc_id: str) -> None:
         elif tecla == "r" and "rechazar" in acciones:
             acciones["rechazar"]()
 
+    # Los atajos (Alt+A confirmar, Alt+R descartar) ya se anuncian con
+    # tooltip() en los propios botones de acción — un indicador flotante
+    # aparte terminaba superpuesto sobre "Confirmar y Registrar"
+    # (detectado al verificar esta pantalla en navegador).
     ui.keyboard(_atajo_revision, repeating=False)
-    if documento.estado in ESTADOS_EDITABLES:
-        ui.label("Atajos: Alt+A confirmar · Alt+R descartar").classes(
-            "fixed-bottom-right q-ma-md q-px-sm q-py-xs rounded bg-slate-100 text-[11px] text-slate-500"
-        )
 
     # Auto-refresco mientras el RPA corre en segundo plano.
     if documento.estado == EstadoDocumento.EJECUTANDO_RPA:
@@ -175,23 +190,30 @@ def _panel_visor(documento: DocumentoRegistro) -> None:
         )
 
     with ui.column().classes("w-full h-full no-wrap gap-2 q-pa-sm bg-slate-50"):
-        with ui.row().classes("items-center justify-between no-wrap w-full q-px-xs"):
+        with ui.row().classes(
+            "items-center justify-between no-wrap w-full q-px-sm q-py-xs bg-white "
+            "rounded-lg border border-slate-200"
+        ):
             with ui.row().classes("items-center gap-1"):
                 ui.button(icon="chevron_left").props("flat round dense").bind_enabled_from(
                     pagina_actual, "numero", backward=lambda n: n > 1
                 ).on_click(lambda: _mover_pagina(-1))
-                ui.label().bind_text_from(
+                ui.label().classes("text-xs font-medium text-slate-600").bind_text_from(
                     pagina_actual, "numero", backward=lambda n: f"Pág. {n} / {total_paginas}"
                 )
                 ui.button(icon="chevron_right").props("flat round dense").bind_enabled_from(
                     pagina_actual, "numero", backward=lambda n: n < total_paginas
                 ).on_click(lambda: _mover_pagina(1))
-            with ui.row().classes("items-center gap-1"):
-                ui.label("Visor PDF").classes("text-[11px] font-medium text-slate-500")
-                ui.link("Abrir", f"/pdf/{documento.id}", new_tab=True).classes("text-xs text-primary")
+            with ui.row().classes("items-center gap-2"):
+                ui.label("Documento").classes(
+                    "text-[10.5px] font-semibold uppercase tracking-wider text-slate-400"
+                )
+                ui.link("Abrir en pestaña nueva", f"/pdf/{documento.id}", new_tab=True).classes(
+                    "text-xs text-primary font-medium"
+                )
 
         visor = ui.html(_marco_html(1)).classes(
-            "w-full flex-1 rounded-md border border-slate-200 overflow-hidden bg-slate-100 shadow-sm"
+            "w-full flex-1 rounded-lg border border-slate-200 overflow-hidden bg-slate-100 shadow-sm"
         ).style("min-height:0")
 
         def _mover_pagina(delta: int) -> None:
@@ -207,7 +229,7 @@ def _panel_visor(documento: DocumentoRegistro) -> None:
 def _panel_formulario(
     documento: DocumentoRegistro,
     borrador: dict,
-    capturista: dict,
+    revisor: dict,
     estado_visto: dict,
     pipeline,
     config,
@@ -229,7 +251,7 @@ def _panel_formulario(
         (`_precargar_borrador`, con los nombres de columna del esquema v2:
         numero_oficio, fecha_emision, dependencia_area, remitente_nombre,
         remitente_cargo, destinatario_nombre, destinatario_cargo, asunto,
-        plazo_dias) y enlazado para que las ediciones del capturista se
+        plazo_dias) y enlazado para que las ediciones del revisor se
         reflejen de vuelta en `borrador`.
 
         OJO: `bind_value_to` es una sincronización de UNA sola vía
@@ -237,8 +259,9 @@ def _panel_formulario(
         cuando cambia `borrador`) — sin pasar `value=` al construir el
         widget, esa sincronización inicial pisaría el dato ya precargado en
         `borrador` con el valor vacío por defecto del widget, dejando el
-        formulario en blanco pese a que la IA sí extrajo los metadatos. Por
-        eso el valor inicial se toma explícitamente de `borrador` aquí
+        formulario en blanco pese a que la extracción automática sí
+        completó los metadatos. Por eso el valor inicial se toma
+        explícitamente de `borrador` aquí
         (bind_value_to no es encadenable, de ahí que no se use bind_value).
         """
         valor_inicial = borrador.get(clave)
@@ -264,11 +287,13 @@ def _panel_formulario(
             _banner_extraccion_heuristica(documento)
 
             # ---- Formulario ----
-            ui.label("Metadatos del oficio").classes("text-sm font-semibold text-slate-700")
+            ui.label("METADATOS DEL OFICIO").classes(
+                "text-[11px] font-semibold uppercase tracking-wider text-slate-400"
+            )
             ui.label(
-                "Datos precargados por Gemini 2.5 Flash; la normalización (mayúsculas, "
+                "Campos precargados automáticamente; la normalización (mayúsculas, "
                 "folios sanitizados) se aplica al confirmar."
-            ).classes("text-[11px] text-slate-400")
+            ).classes("text-[11px] text-slate-400 -mt-2")
 
             _campo("numero_oficio", "Número de Oficio / Folio", placeholder="DSA-2026-089-OF o S/N", validador=_validar_folio)
             _campo("fecha_emision", "Fecha de Emisión (YYYY-MM-DD)", placeholder="2026-09-01", validador=_validar_fecha)
@@ -295,7 +320,8 @@ def _panel_formulario(
             # ---- Acciones ----
             ui.separator().classes("w-full")
             with ui.row().classes("w-full items-center justify-end gap-2 no-wrap").style(
-                "position:sticky;bottom:0;background:white;padding:8px 0;z-index:1"
+                "position:sticky;bottom:0;background:white;padding:10px 0;z-index:1;"
+                "border-top:1px solid #f1f5f9"
             ):
                 if documento.estado == EstadoDocumento.ERROR_RPA:
                     ui.button("Reintentar RPA", icon="restart_alt").props(
@@ -345,7 +371,7 @@ def _panel_formulario(
 
         try:
             documento_actualizado = await run.io_bound(
-                pipeline.confirmar_hitl, documento.id, metadatos, capturista["valor"].strip() or "CAPTURISTA-DEV"
+                pipeline.confirmar_hitl, documento.id, metadatos, revisor["valor"].strip() or REVISOR_POR_DEFECTO
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fallo al confirmar %s", documento.id)
@@ -383,7 +409,7 @@ def _panel_formulario(
                 pipeline.descartar,
                 documento.id,
                 campo_motivo.value.strip(),
-                capturista["valor"].strip() or "CAPTURISTA-DEV",
+                revisor["valor"].strip() or REVISOR_POR_DEFECTO,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fallo al descartar %s", documento.id)
@@ -395,7 +421,7 @@ def _panel_formulario(
     async def _reintentar_rpa() -> None:
         try:
             await run.io_bound(
-                pipeline.reintentar_rpa, documento.id, capturista["valor"].strip() or "CAPTURISTA-DEV"
+                pipeline.reintentar_rpa, documento.id, revisor["valor"].strip() or REVISOR_POR_DEFECTO
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fallo al reintentar RPA de %s", documento.id)
@@ -424,7 +450,7 @@ _ETIQUETA_ACCION = {
 def _panel_auditoria(documento: DocumentoRegistro, pipeline) -> None:
     """
     Historial de acciones HITL sobre este documento: quién, qué acción y
-    qué campos corrigió respecto de lo que extrajo la IA/heurística (ver
+    qué campos corrigió respecto de lo que se extrajo automáticamente (ver
     database.py::listar_auditoria, core.models.diferencia_metadatos).
     Colapsado por defecto para no saturar la pantalla en el caso normal
     (documento aún sin ninguna acción registrada).
@@ -460,25 +486,27 @@ def _panel_auditoria(documento: DocumentoRegistro, pipeline) -> None:
 def _banner_extraccion_heuristica(documento: DocumentoRegistro) -> None:
     """
     Advertencia imposible de pasar por alto cuando el formulario NO viene
-    de Gemini sino del extractor de respaldo por regex (core.heuristic_
-    extractor — se activa cuando la IA falla, ver core.pipeline). Todo lo
-    precargado salvo quizá número de oficio/fecha son placeholders
-    genéricos: el revisor debe completar/verificar campo por campo, nunca
-    solo confirmar.
+    de la extracción automática principal sino del respaldo por regex
+    (core.heuristic_extractor — se activa cuando la extracción principal
+    falla, ver core.pipeline). Todo lo precargado salvo quizá número de
+    oficio/fecha son placeholders genéricos: el revisor debe completar/
+    verificar campo por campo, nunca solo confirmar.
     """
     if documento.extraccion_metodo != MetodoExtraccion.HEURISTICA_FALLBACK:
         return
-    with ui.card().classes("bg-orange-50 border border-orange-200 w-full shadow-none rounded-lg gap-2"):
+    with ui.card().classes(
+        "bg-orange-50 border-l-4 border-orange-400 w-full shadow-none rounded-lg gap-2"
+    ):
         ui.icon("warning", color="orange-9").classes("text-xl")
         with ui.column().classes("gap-0"):
-            ui.label("Extracción heurística de respaldo — la IA no estaba disponible").classes(
+            ui.label("Extracción de respaldo — requiere revisión completa").classes(
                 "text-sm font-semibold text-orange-900"
             )
             ui.label(
-                "Este formulario NO se precargó con Gemini: se rescató número de oficio y fecha "
-                "por texto plano (cuando fue posible) y todo lo demás quedó en un valor genérico "
-                "(\"NO ESPECIFICADO\", \"ILEGIBLE\"). Revise y complete CADA campo contra el visor "
-                "de PDF antes de confirmar — no se limite a corroborar lo precargado."
+                "Este formulario NO se completó automáticamente: se rescató número de oficio y "
+                "fecha por texto plano (cuando fue posible) y todo lo demás quedó en un valor "
+                "genérico (\"NO ESPECIFICADO\", \"ILEGIBLE\"). Revise y complete CADA campo contra "
+                "el visor de PDF antes de confirmar — no se limite a corroborar lo precargado."
             ).classes("text-xs text-orange-800")
 
 
@@ -486,7 +514,7 @@ def _banner_estado(documento: DocumentoRegistro) -> None:
     estado = documento.estado
 
     if estado == EstadoDocumento.ERROR_RPA and documento.rpa and documento.rpa.mensaje_error:
-        with ui.card().classes("bg-rose-50 w-full shadow-none rounded-lg gap-2"):
+        with ui.card().classes("bg-rose-50 border-l-4 border-rose-400 w-full shadow-none rounded-lg gap-2"):
             ui.icon("report", color="negative").classes("text-xl")
             with ui.column().classes("gap-0"):
                 ui.label("El registro en la Intranet falló").classes("text-sm font-semibold text-rose-700")
@@ -501,7 +529,9 @@ def _banner_estado(documento: DocumentoRegistro) -> None:
 
     if estado == EstadoDocumento.COMPLETADO:
         rpa = documento.rpa
-        with ui.card().classes("bg-emerald-50 w-full shadow-none rounded-lg gap-2"):
+        with ui.card().classes(
+            "bg-emerald-50 border-l-4 border-emerald-400 w-full shadow-none rounded-lg gap-2"
+        ):
             ui.icon("verified", color="positive").classes("text-xl")
             with ui.column().classes("gap-0"):
                 ui.label("Documento registrado en la Intranet").classes(
@@ -514,9 +544,9 @@ def _banner_estado(documento: DocumentoRegistro) -> None:
                         "text-xs text-emerald-700 underline"
                     )
                 if documento.sheets.sincronizado:
-                    destino = "Google Sheets" if documento.sheets.modo == "google" else "tablero local (stub)"
+                    destino = "a Google Sheets" if documento.sheets.modo == "google" else "al respaldo local"
                     ui.label(
-                        f"Sincronizado al {destino}"
+                        f"Sincronizado {destino}"
                         + (f", fila {documento.sheets.fila_index}" if documento.sheets.fila_index else "")
                     ).classes("text-[11px] text-emerald-600")
                 elif documento.sheets.error:
@@ -530,7 +560,7 @@ def _banner_estado(documento: DocumentoRegistro) -> None:
         return
 
     if estado == EstadoDocumento.DESCARTADO:
-        with ui.card().classes("bg-slate-100 w-full shadow-none rounded-lg gap-2"):
+        with ui.card().classes("bg-slate-100 border-l-4 border-slate-300 w-full shadow-none rounded-lg gap-2"):
             ui.icon("folder_off", color="grey-7").classes("text-xl")
             with ui.column().classes("gap-0"):
                 ui.label("Documento descartado").classes("text-sm font-semibold text-slate-600")
@@ -539,7 +569,9 @@ def _banner_estado(documento: DocumentoRegistro) -> None:
         return
 
     if estado == EstadoDocumento.EJECUTANDO_RPA:
-        with ui.card().classes("bg-sky-50 w-full shadow-none rounded-lg gap-2 items-center"):
+        with ui.card().classes(
+            "bg-sky-50 border-l-4 border-sky-400 w-full shadow-none rounded-lg gap-2 items-center"
+        ):
             ui.spinner("dots", size="1.2em", color="info")
             ui.label("Registrando el oficio en la Intranet Webix (RPA en ejecución)…").classes(
                 "text-sm text-sky-700"

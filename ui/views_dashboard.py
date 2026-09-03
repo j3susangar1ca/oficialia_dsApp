@@ -32,7 +32,9 @@ from nicegui import run, ui
 from core.models import GRUPOS_BANDEJA, MetodoExtraccion, OrigenIngesta, meta_estado
 from core.pipeline import DocumentoDuplicado
 from ui.layout import (
+    REVISOR_POR_DEFECTO,
     encabezado,
+    estilo_badge,
     obtener_config,
     obtener_pipeline,
     panel_kpis,
@@ -67,10 +69,12 @@ COLORES_BADGE = {
     "DESCARTADO": "grey-6",
 }
 
-#: Etiqueta + color del método de extracción (columna "Extracción").
+#: Etiqueta + color del método de extracción (columna "Extracción"). Sin
+#: mencionar el proveedor de IA: solo importa si el dato quedó listo para
+#: confirmar tal cual o si requiere revisión campo por campo.
 METODO_ETIQUETA = {
-    MetodoExtraccion.IA.value: ("Gemini IA", "grey-7"),
-    MetodoExtraccion.HEURISTICA_FALLBACK.value: ("Heurística ⚠", "orange-8"),
+    MetodoExtraccion.IA.value: ("Automático", "grey-7"),
+    MetodoExtraccion.HEURISTICA_FALLBACK.value: ("Requiere revisión", "orange-8"),
     MetodoExtraccion.HITL.value: ("Manual", "grey-7"),
 }
 
@@ -86,9 +90,9 @@ def _fila_de_tabla(documento) -> dict:
         "archivo": documento.nombre_archivo_original,
         "oficio": documento.numero_oficio or "—",
         "estado": info.etiqueta,
-        "estado_color": COLORES_BADGE.get(documento.estado.value, "grey-6"),
+        "estado_style": estilo_badge(COLORES_BADGE.get(documento.estado.value, "grey-6")),
         "metodo": metodo_etiqueta,
-        "metodo_color": metodo_color,
+        "metodo_style": estilo_badge(metodo_color),
         "paginas": documento.preproceso.num_paginas if documento.preproceso else None,
         "ingreso": tiempo_relativo(documento.fecha_ingesta),
         "_orden": documento.fecha_ingesta,
@@ -99,14 +103,19 @@ def _fila_de_tabla(documento) -> dict:
 def pagina_bandeja() -> None:
     """Bandeja de entrada + carga manual."""
     aplicar_tema()
-    capturista: dict = {"valor": "CAPTURISTA-DEV"}
-    estado_ui: dict = {"grupo": "pendientes", "busqueda": ""}
+    revisor: dict = {"valor": ""}
+    # fecha_desde/fecha_hasta ya deben existir aquí: _calcular_filas() (más
+    # abajo) los lee antes de que los ui.input del rango de fechas alcancen
+    # a poblarlos vía bind_value_to, y un KeyError en esa primera pasada
+    # dejaba la tabla en blanco hasta el primer _refrescar() (detectado al
+    # verificar esta pantalla en navegador).
+    estado_ui: dict = {"grupo": "pendientes", "busqueda": "", "fecha_desde": "", "fecha_hasta": ""}
     # Evita enviar actualizaciones WebSocket de la tabla/KPIs cuando SQLite
     # no ha cambiado; el timer sigue siendo barato y no recarga la página.
     refresco_visto: dict = {"filas": None, "kpis": None}
 
     # El encabezado es un layout de primer nivel (fuera del contenedor).
-    encabezado(capturista)
+    encabezado(revisor)
 
     def _grupo_actual():
         return next((g for g in GRUPOS_BANDEJA if g.id == estado_ui["grupo"]), GRUPOS_BANDEJA[0])
@@ -142,21 +151,24 @@ def pagina_bandeja() -> None:
         # ---------------- Filtros + buscador ----------------
         chips: list[tuple[ui.button, object]] = []
 
+        _CHIP_ACTIVO = "bg-white text-slate-800 shadow-sm"
+        _CHIP_INACTIVO = "bg-transparent text-slate-500 hover:text-slate-700"
+
         def _repintar_chips() -> None:
-            """Recolorea los chips según el grupo activo."""
+            """Recolorea los chips según el grupo activo (estilo control segmentado)."""
             for chip, grupo in chips:
                 if grupo.id == estado_ui["grupo"]:
-                    chip.classes("bg-primary text-white", remove="bg-slate-100 text-slate-500 hover:bg-slate-200")
+                    chip.classes(_CHIP_ACTIVO, remove=_CHIP_INACTIVO)
                 else:
-                    chip.classes("bg-slate-100 text-slate-500 hover:bg-slate-200", remove="bg-primary text-white")
+                    chip.classes(_CHIP_INACTIVO, remove=_CHIP_ACTIVO)
 
         with ui.row().classes("w-full items-center justify-between gap-3 no-wrap flex-wrap"):
-            with ui.row().classes("gap-1 flex-wrap"):
+            with ui.row().classes("gap-1 p-1 bg-slate-100 rounded-lg flex-wrap"):
                 for grupo in GRUPOS_BANDEJA:
                     chip = ui.button(grupo.etiqueta).classes(
-                        "rounded-full px-3 py-1 text-xs font-medium no-wrap shadow-none "
-                        "bg-slate-100 text-slate-500 hover:bg-slate-200"
-                    ).props('no-caps dense padding="2px 10px"')
+                        "rounded-md px-3 py-1 text-xs font-medium no-wrap shadow-none "
+                        "transition-colors"
+                    ).props('no-caps dense flat padding="4px 10px"')
                     chip.on(
                         "click",
                         lambda _=None, g=grupo: (
@@ -227,17 +239,25 @@ def pagina_bandeja() -> None:
         # no rompía la selección en sí, pero es evitable).
         tabla = ui.table(
             columns=COLUMNAS, rows=filas_iniciales, row_key="id", selection="multiple", pagination=25,
-        ).classes("w-full shadow-1").props(
+        ).classes("w-full rounded-xl overflow-hidden").props(
             "flat bordered dense no-data='Sin documentos en esta vista' "
             "rows-per-page-options='[25, 50, 100]' binary-state-sort"
         )
+        # Badges "soft pill" (fondo claro + texto del mismo tono) en vez del
+        # q-badge sólido por defecto: mismo lenguaje visual en toda la app
+        # (ver ui.layout.estilo_badge, que calcula estado_style/metodo_style).
+        # Se mantiene la misma estructura de slot (sin envolver en <q-td>,
+        # ver nota de "on_select"/"pagination" arriba: esta pantalla ya se
+        # verificó en navegador con slots "planos" como estos).
         tabla.add_slot(
             "body-cell-estado",
-            '<q-badge :color="props.row.estado_color" :label="props.row.estado" class="q-px-sm"/>',
+            '<span class="rounded-full px-2.5 py-0.5 text-[11px] font-medium" '
+            ':style="props.row.estado_style">{{ props.row.estado }}</span>',
         )
         tabla.add_slot(
             "body-cell-metodo",
-            '<q-badge outline :color="props.row.metodo_color" :label="props.row.metodo" class="q-px-sm"/>',
+            '<span class="rounded-full px-2.5 py-0.5 text-[11px] font-medium" '
+            ':style="props.row.metodo_style">{{ props.row.metodo }}</span>',
         )
         tabla.add_slot(
             "body-cell-archivo",
@@ -253,13 +273,19 @@ def pagina_bandeja() -> None:
         tabla.on_select(lambda e: estado_ui.update(seleccion=[fila["id"] for fila in tabla.selected]))
 
         # ---------------- Dropzone de carga manual ----------------
-        with ui.card().classes("w-full bg-slate-50 shadow-none rounded-lg"):
+        with ui.card().classes(
+            "w-full bg-white shadow-none rounded-xl border border-dashed border-slate-300"
+        ):
             with ui.row().classes("items-center justify-between no-wrap gap-4 w-full"):
-                with ui.column().classes("gap-0"):
-                    ui.label("Carga manual de oficios (PDF)").classes("text-sm font-semibold text-slate-700")
-                    ui.label("Arrastre o seleccione archivos; el pipeline los procesará automáticamente.").classes(
-                        "text-xs text-slate-400"
-                    )
+                with ui.row().classes("items-center gap-3 no-wrap"):
+                    ui.icon("upload_file", size="22px").classes("text-slate-400")
+                    with ui.column().classes("gap-0"):
+                        ui.label("Carga manual de oficios (PDF)").classes(
+                            "text-sm font-semibold text-slate-700"
+                        )
+                        ui.label(
+                            "Arrastre o seleccione archivos; el pipeline los procesará automáticamente."
+                        ).classes("text-xs text-slate-400")
                 ui.upload(
                     label="Subir PDFs",
                     auto_upload=True,
@@ -307,9 +333,9 @@ def pagina_bandeja() -> None:
         if not ids:
             return
         pipeline = obtener_pipeline()
-        revisor = capturista["valor"].strip() or "CAPTURISTA-DEV"
+        nombre_revisor = revisor["valor"].strip() or REVISOR_POR_DEFECTO
         try:
-            resultado = await run.io_bound(pipeline.confirmar_lote, ids, revisor)
+            resultado = await run.io_bound(pipeline.confirmar_lote, ids, nombre_revisor)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fallo la confirmación en lote")
             ui.notify(f"No se pudo confirmar el lote: {exc}", type="negative", position="top")
