@@ -102,154 +102,151 @@ los PDFs institucionales quedan a salvo.
 ---
 
 ## 3. Arquitectura (monolito modular, un solo proceso)
+# Oficialía Digital DSA
 
-```text
-                 ┌────────────────────────────────────────────────────────┐
-                 │                     python main.py                     │
-                 ├────────────────────────────────────────────────────────┤
-   01_entrada/ ─▶│ core/watcher.py   (watchdog + poll de respaldo)        │
-   Web (upload)─▶│ core/pipeline.py  (orquestador del flujo)              │
-                 │   ├─ core/pdf_engine.py    (PyMuPDF: hash/render)      │
-                 │   ├─ core/ai_extractor.py  (Gemini 2.5 Flash)          │
-                 │   ├─ core/file_manager.py  (storage + canónicos)       │
-                 │   ├─ database.py           (SQLite WAL + CRUD)         │
-                 │   ├─ rpa/playwright_rpa.py  (Intranet Webix)           │
-                 │   └─ core/sheets_sync.py   (Sheets / stub local)       │
-                 │ ui/  (NiceGUI: bandeja + HITL split-screen)            │
-                 └────────────────────────────────────────────────────────┘
+> Aplicación monolítica en Python para recibir oficios PDF, extraer metadatos con Gemini, revisarlos por una persona y registrarlos mediante RPA.
+
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue?style=flat-square)
+![UI NiceGUI](https://img.shields.io/badge/UI-NiceGUI-gray?style=flat-square)
+![Database SQLite](https://img.shields.io/badge/Database-SQLite-green?style=flat-square)
+![License Internal](https://img.shields.io/badge/License-Uso%20interno-critical?style=flat-square)
+
+## Alcance y arquetipo
+
+**Oficialía Digital DSA** es una aplicación web de gestión documental de proceso único. Expone una interfaz NiceGUI y dos rutas HTTP para servir documentos; no ofrece una API pública de integración. Su punto de entrada es [`main.py`](main.py), ejecutado con `python main.py`.
+
+El sistema recibe PDF desde la carga web o desde una carpeta vigilada, valida y renderiza el archivo, solicita metadatos estructurados a Gemini, exige su validación *human-in-the-loop* (HITL), y finalmente registra el oficio mediante RPA o un simulador. SQLite conserva el estado y Google Sheets recibe una réplica no bloqueante cuando el registro RPA tiene éxito.
+
+| Área | Implementación |
+| --- | --- |
+| Runtime | Python 3.11+ |
+| Interfaz y servidor | NiceGUI, FastAPI/Starlette y Uvicorn (dependencias transitivas de NiceGUI) |
+| Validación y configuración | Pydantic 2 y pydantic-settings |
+| Persistencia | SQLite con WAL |
+| Procesamiento PDF | PyMuPDF y Pillow; OCR auxiliar opcional con Tesseract/pytesseract |
+| IA | `google-genai`, modelo configurable (por defecto `gemini-2.5-flash`) |
+| Automatización | Playwright contra la Intranet Webix, con modo simulación |
+| Tablero externo | Google Sheets mediante gspread y una cuenta de servicio |
+| Empaquetado Windows | PyInstaller e Inno Setup |
+
+## Arquitectura y flujo operativo
+
+```mermaid
+flowchart LR
+    Scanner[Escáner / carpeta vigilada] --> Watcher[Vigilante watchdog]
+    Upload[Carga web] --> UI[Interfaz NiceGUI]
+    Watcher --> Pipeline[FlujoDocumental]
+    UI --> Pipeline
+    Pipeline --> Files[Storage de PDFs]
+    Pipeline --> DB[(SQLite WAL)]
+    Pipeline --> PDF[PyMuPDF: validar, sanitizar y renderizar]
+    PDF --> AI[Gemini: extracción estructurada]
+    AI --> HITL[Revisión HITL]
+    HITL -->|Confirmar| Canonico[PDF canónico y JSON espejo]
+    Canonico --> RPA[RPA Playwright o simulación]
+    RPA --> Intranet[Intranet Webix]
+    RPA --> Sheets[Google Sheets o CSV local]
+    HITL -->|Descartar| Error[Cuarentena]
+    Pipeline -->|Fallo de PDF o IA| Error
 ```
 
-### Estructura de carpetas
+El flujo persiste los documentos y sus metadatos relacionados en una única tabla `documentos`. Las conexiones a SQLite son cortas y configuran WAL, `busy_timeout` y control de concurrencia optimista por versión. El SHA-256 del archivo tiene una restricción única para impedir duplicados entre los canales web y escáner.
 
-```text
-oficialia_dsa/
-├── config.py             # Configuración central (pydantic-settings + .env)
-├── database.py           # SQLite WAL, esquema y repositorio CRUD
-├── core/                 # Lógica de negocio
-│   ├── models.py         # Esquemas Pydantic (MetadatosOficio, estados, badges)
-│   ├── pdf_engine.py     # PyMuPDF: hash, sanitización y render
-│   ├── ai_extractor.py   # Gemini 2.5 Flash + prompt institucional (verbatim)
-│   ├── file_manager.py   # Gestión de storage y nomenclatura canónica
-│   ├── pipeline.py       # Orquestador (ingesta → HITL → RPA → Sheets)
-│   ├── heuristic_extractor.py # Extractor de respaldo por regex (sin IA)
-│   ├── logging_setup.py  # Logging a consola + archivo rotativo
-│   ├── watcher.py        # Vigilancia en tiempo real (watchdog)
-│   └── sheets_sync.py    # Google Sheets vía Service Account (+ stub local)
-├── rpa/
-│   └── playwright_rpa.py # Worker RPA (real + simulación) para op_cucs.fwx
-├── ui/
-│   ├── layout.py         # Encabezado, KPIs y contexto compartido
-│   ├── views_dashboard.py# Bandeja: filtros, buscador, tabla y dropzone
-│   └── views_hitl.py     # Split-screen: visor PDF + formulario reactivo
-├── tests/                # pytest — ver sección 5.6 (sin red, sin credenciales)
-├── storage/              # 01_entrada · 02_en_proceso · 03_procesados · 04_errores
-├── data/                 # oficialia.db (SQLite) y tablero_local.csv (stub)
-├── main.py               # Punto de entrada único
-├── requirements.txt      # Dependencias exactas
-├── requirements-dev.txt  # + pytest (desarrollo/pruebas)
-├── pytest.ini
-├── .env.example          # Plantilla de variables de entorno
-├── packaging/            # Instalador Windows (ver sección 2)
-│   ├── oficialia.spec    # Bundle PyInstaller (onedir)
-│   ├── oficialia.iss     # Instalador Inno Setup
-│   ├── build_windows.ps1 # Orquesta todo el proceso de build
-│   └── requirements-build.txt
-├── .github/workflows/
-│   └── build-windows-installer.yml  # Construye el instalador en CI (runner Windows)
-└── README.md
+### Ciclo de vida
+
+```mermaid
+stateDiagram-v2
+    [*] --> INGESTADO
+    INGESTADO --> EN_PREPROCESO
+    EN_PREPROCESO --> EXTRAYENDO
+    EXTRAYENDO --> PENDIENTE_REVISION
+    EN_PREPROCESO --> DESCARTADO: error PDF
+    EXTRAYENDO --> DESCARTADO: error de IA
+    PENDIENTE_REVISION --> EJECUTANDO_RPA: confirmar HITL
+    PENDIENTE_REVISION --> DESCARTADO: descartar HITL
+    EJECUTANDO_RPA --> COMPLETADO: RPA exitoso
+    EJECUTANDO_RPA --> ERROR_RPA: RPA fallido
+    ERROR_RPA --> EJECUTANDO_RPA: reintentar
+    COMPLETADO --> [*]
+    DESCARTADO --> [*]
 ```
 
-> **Adiciones justificadas** respecto de la estructura base solicitada:
-> `core/pipeline.py` (el orquestador que en el original era `DocumentWorkflowOrchestrator`;
-> el watcher, la UI y el RPA lo comparten) y `core/sheets_sync.py` (regla 6 de
-> sincronización externa). No existen scripts secundarios sueltos: todo el sistema
-> se ejecuta con `python main.py`.
+Los archivos recorren `storage/01_entrada`, `storage/02_en_proceso`, `storage/03_procesados` y `storage/04_errores`. La confirmación HITL mueve el PDF a la ubicación canónica y genera su JSON espejo; los errores se aíslan con un archivo `.error.txt` asociado.
 
----
+## Inicio rápido desde código fuente
 
-## 4. Máquina de estados y ciclo de vida físico
+### Prerrequisitos
 
-```text
- INGESTADO ─▶ EN_PREPROCESO ─▶ EXTRAYENDO ─▶ PENDIENTE_REVISION
-                                              │
-                 [Confirmar y Registrar] ──────┤──▶ EJECUTANDO_RPA ─▶ COMPLETADO
-                 [Descartar] ──▶ DESCARTADO    │         └▶ ERROR_RPA ─(Reintentar)─┘
-```
+- Python **3.11 o superior** con `venv` y `pip`.
+- Una clave de Gemini para completar la extracción real: `[CONFIGURAR_GEMINI_API_KEY]`.
+- Solo para `RPA_MODO=playwright`: acceso a la Intranet, credenciales si aplican y Chromium de Playwright.
+- Solo para Google Sheets: ID de hoja y credenciales de cuenta de servicio.
 
-| Estado | Archivo físico | Observaciones |
-| --- | --- | --- |
-| `INGESTADO` | `01_entrada/{epoch_ms}_{nombre}` | Registro creado tras deduplicar hash |
-| `EN_PREPROCESO` | `02_en_proceso/{uuid}.pdf` | Validación + sanitización PyMuPDF |
-| `EXTRAYENDO` | `02_en_proceso/{uuid}.pdf` | Render 300 dpi + Gemini 2.5 Flash |
-| `PENDIENTE_REVISION` | `02_en_proceso/{uuid}.pdf` | Cola de la bandeja HITL |
-| `EJECUTANDO_RPA` | `03_procesados/YYYY/MM/{canónico}.pdf` | + `.json` espejo |
-| `COMPLETADO` | ídem | Acuse + screenshot + Sheets (no bloqueante) |
-| `ERROR_RPA` | ídem | Reinteligible sin reextraer ([Reintentar RPA]) |
-| `DESCARTADO` | `04_errores/{nombre}` + `.error.txt` | Descarte humano o fallo temprano |
-
-**Fallos de preproceso/extracción**: el original distinguía `ERROR_PREPROCESO` y
-`ERROR_EXTRACCION`; esta versión consolidada los registra como `DESCARTADO` con el
-motivo completo en `error_msg` y el archivo aislado en `04_errores/` con su
-`.error.txt` — misma trazabilidad, menos estados. El duplicado por hash también se
-aísla en `04_errores` con motivo `DUPLICATE_HASH_DETECTED`.
-
----
-
-## 5. Instalación desde código fuente (desarrollo, o cualquier plataforma sin el instalador)
-
-> Si solo va a **usar** el sistema en Windows 10/11, no necesita nada de esta sección:
-> vea la sección 2. Esta ruta es para desarrollo, contribución al código, o para
-> ejecutar el sistema en Linux/macOS (el instalador empaquetado es exclusivo de Windows).
-
-### 5.1 Requisitos previos
-
-- **Python 3.11+** (probado con 3.12) con `venv` y `pip`.
-- (Solo para RPA real) acceso LAN/VPN a la Intranet institucional y credenciales.
-- (Solo para IA real) una API key de Google AI Studio (Gemini).
-
-### 5.2 Crear el entorno virtual e instalar dependencias
+### Instalación y ejecución
 
 ```bash
-# 1) Ubicarse en la raíz del proyecto
-cd oficialia_dsa
+python -m venv .venv
+source .venv/bin/activate
+# En Windows PowerShell: .venv\Scripts\Activate.ps1
 
-# 2) Crear y activar el entorno virtual
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
-# 3) Instalar las dependencias exactas
 pip install -r requirements.txt
-```
-
-### 5.3 Instalar el navegador de Playwright (solo para RPA real)
-
-```bash
-# Descarga el Chromium gestionado por Playwright (~150 MB, una sola vez)
-playwright install chromium
-```
-
-> En modo `RPA_MODO=simulacion` (default) **no** es necesario instalar el navegador.
-
-### 5.4 Configurar variables de entorno
-
-```bash
 cp .env.example .env
-# Edite .env: como mínimo GEMINI_API_KEY para extracción real.
-# Sin configurar nada, el sistema arranca seguro: RPA simulado + Sheets stub.
-chmod 600 .env     # recomendado en el servidor institucional
-```
-
-### 5.5 Ejecutar el sistema (comando único)
-
-```bash
 python main.py
 ```
 
-Abrir en el navegador: **http://localhost:8080** (o `APP_PORT` del `.env`).
+Abra `http://localhost:8080` si conserva el valor predeterminado de `APP_PORT`. La aplicación crea las carpetas de almacenamiento y la base de datos al iniciar.
 
-- Deje PDFs en `storage/01_entrada/` (el escáner departamental puede apuntar ahí por SMB)
-  o súbalos desde la bandeja web.
-- Revise cada documento en `Pendientes` → verifique el formulario → **[Confirmar y Registrar]**.
+Para usar automatización real, instale el navegador administrado por Playwright después de instalar las dependencias:
+
+```bash
+playwright install chromium
+```
+
+En desarrollo, los datos se almacenan bajo la raíz del repositorio. En el ejecutable Windows empaquetado, se usan `%ProgramData%\OficialiaDigitalDSA` o, como reserva, `%LOCALAPPDATA%\OficialiaDigitalDSA`.
+
+## Configuración
+
+Copie [`.env.example`](.env.example) a `.env`; `config.py` es la fuente única de configuración. Las variables no reconocidas se ignoran. No incluya secretos en el control de versiones.
+
+| Grupo | Variables principales | Predeterminado / efecto sin configurar |
+| --- | --- | --- |
+| Interfaz | `APP_HOST`, `APP_PORT`, `MAX_UPLOAD_BYTES` | `0.0.0.0`, `8080`, 25 MiB |
+| Datos | `DATABASE_PATH`, `STORAGE_ROOT` | `data/oficialia.db` y `storage/` |
+| IA | `GEMINI_API_KEY`, `GEMINI_MODELO`, `GEMINI_TIMEOUT_MS`, `GEMINI_REINTENTOS`, `RENDER_DPI`, `RENDER_MAX_PAGINAS` | Sin `GEMINI_API_KEY`, el documento se descarta de forma trazable; modelo `gemini-2.5-flash` |
+| Watchfolder | `WATCHFOLDER_ENABLED`, `WATCHFOLDER_INTERVALO_MS`, `WATCHFOLDER_ESTABILIDAD_MS`, `WATCHFOLDER_MAX_REINTENTOS` | Activo, sondeo de respaldo cada 5 s |
+| RPA | `RPA_MODO`, `RPA_HEADLESS`, `RPA_TIMEOUT_MS`, `RPA_REINTENTOS`, `RPA_SIMULACION_FALLAR` | `simulacion`, sin navegador real |
+| Intranet | `INTRANET_BASE_URL`, `INTRANET_HTTP_USERNAME`, `INTRANET_HTTP_PASSWORD`, `RPA_OFICIALIA_CVE`, `RPA_HCG_DEPENDENCIA_CVE`, `RPA_SECCION_CVE` | URL institucional configurada en la plantilla; credenciales y CVE vacíos |
+| Resiliencia RPA | `RPA_SELECTOR_TIMEOUT_MS`, `RPA_WEBIX_INIT_TIMEOUT_MS`, `RPA_REINTENTO_BASE_MS`, `RPA_REINTENTO_MAX_MS`, `RPA_SESSION_TTL_MIN`, `RPA_JITTER_FACTOR` | Valores seguros internos de `config.py` |
+| Sheets | `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SHEETS_SHEET_NAME`, `GOOGLE_SERVICE_ACCOUNT_JSON` | Sin destino o credenciales se escribe `data/tablero_local.csv` |
+
+También se admite `GOOGLE_APPLICATION_CREDENTIALS` para señalar un archivo de credenciales de Google fuera del `.env`. Configure al menos `GEMINI_API_KEY` para pasar de ingesta a revisión; para producción, reemplace además `[CONFIGURAR_CREDENCIALES_RPA]` y `[CONFIGURAR_CUENTA_SERVICIO_SHEETS]` según corresponda.
+
+## Uso de la interfaz y rutas locales
+
+1. Deposite un PDF en `storage/01_entrada/` o cárguelo en la bandeja de `/`.
+2. Espere a que alcance `PENDIENTE_REVISION` y abra la revisión.
+3. Corrija y confirme los campos extraídos, o descarte el documento con un motivo.
+4. Tras confirmar, supervise el resultado `COMPLETADO` o `ERROR_RPA`; este último se puede reintentar sin repetir la extracción.
+
+Las rutas HTTP están destinadas al visor interno de NiceGUI:
+
+| Ruta | Respuesta |
+| --- | --- |
+| `/` | Bandeja y carga manual de documentos. |
+| `/revision/{doc_id}` | Visor PDF y formulario HITL del documento. |
+| `/pdf/{doc_id}` | El PDF vigente o `404`. |
+| `/evidencia/{doc_id}` | Captura PNG del acuse RPA o `404`. |
+
+Ejemplos de consulta local, usando un identificador existente:
+
+```bash
+curl -OJ http://localhost:8080/pdf/<doc_id>
+curl -o acuse.png http://localhost:8080/evidencia/<doc_id>
+```
+
+## Construcción del instalador Windows
+
+La distribución para Windows se construye **en Windows**; PyInstaller no realiza compilación cruzada. El script crea un entorno de construcción, instala requisitos y PyInstaller, descarga Chromium, genera el bundle y compila el instalador con Inno Setup.
 
 ### 5.6 Ejecutar la suite de pruebas
 
@@ -269,6 +266,9 @@ bandeja), preprocesamiento PyMuPDF, el extractor heurístico de respaldo
 de IA simulado. `pytest.ini` fija `testpaths = tests`.
 
 ---
+```powershell
+.\packaging\build_windows.ps1
+```
 
 ## 6. Modos de operación
 
@@ -283,62 +283,39 @@ de IA simulado. `pytest.ini` fija `testpaths = tests`.
 | Watchfolder | `WATCHFOLDER_ENABLED` | `true` \| `false` | `true` |
 
 Layout del tablero de Sheets (fila 1 = encabezados, gestionados por usted):
+Para generar solamente `dist\OficialiaDigitalDSA` sin requerir Inno Setup:
 
-```text
-A: Fecha registro | B: ID documento | C: Folio oficio    | D: Fecha emisión
-E: Procedencia    | F: Dependencia  | G: Remitente        | H: Asunto
-I: Plazo (días)   | J: Datos sensibles | K: Archivo canónico
-L: Folio acuse RPA | M: RPA exitoso
+```powershell
+.\packaging\build_windows.ps1 -SinInstalador
 ```
 
----
+El workflow [`.github/workflows/build-windows-installer.yml`](.github/workflows/build-windows-installer.yml) se ejecuta manualmente o al publicar etiquetas `v*`. Publica el ejecutable como artefacto y lo adjunta a una GitHub Release solo para etiquetas.
 
-## 7. Mapeo de campos del RPA (Intranet Webix `op_ningr.fwx`)
+## Verificación
 
-| Campo Webix (view id) | Origen del dato |
-| --- | --- |
-| `cve` | CVE de oficialía (config `RPA_OFICIALIA_CVE` o primer elemento del combo) |
-| `anio_ingr`, `fech_rece`, `hora_rece` | Fecha/hora local del registro |
-| `nume_cont`, `nume_ofic` | `numero_oficio` (folio del emisor) |
-| `fech_ofic` | `fecha_emision` en DD/MM/AAAA |
-| `info_sens` | `contiene_datos_sensibles` → `'1'`/`'0'` |
-| `rbDepe` | `procedencia` → `'1'` (HCG) / `'2'` (Ajena) |
-| `dependen` / `txtDepen` | HCG: CVE o búsqueda del combo; Ajena: texto libre |
-| `remi_nomb`, `remi_carg` | Remitente (nombre/cargo) |
-| `dest_nomb`, `dest_carg` | Destinatario (nombre/cargo) |
-| `tipo_ofic` | `'5'` (CON TÉRMINO) si `plazo_dias > 0`, si no `'1'` (ORIGINAL) |
-| `fech_term`, `txtFech_term` | `fecha_emision + plazo_dias` |
-| `clase` | `'5'` si el asunto menciona INVITACIÓN, si no `'4'` |
-| `asunto`, `nota` | Síntesis y `PLAZO ESTIPULADO: N DÍA(S)` |
-| PDF canónico | `input[type=file]` del formulario (si la pantalla lo expone) |
+El repositorio no declara una suite de pruebas automatizada ni un *linter*. Como verificación mínima del código fuente, ejecute:
 
-Acuse: folio detectado por regex `HCG-OP-\d{4}-\d{4,}…` en diálogos nativos, texto de la
-página (todos los frames) o la URL; screenshot completo en
-`03_procesados/YYYY/MM/acuse_{uuid}.png` (fallos: `04_errores/YYYY/MM/error_{uuid}.png`).
+```bash
+python -m compileall -q config.py main.py database.py core rpa ui
+```
 
----
+La prueba funcional requiere un PDF válido y una configuración de Gemini. Para validar las rutas de salida sin conectar servicios institucionales, conserve `RPA_MODO=simulacion` y deje Google Sheets sin configurar; la extracción sigue requiriendo una clave Gemini válida.
 
-## 8. Decisiones de consolidación (original → Python)
+## Estructura del repositorio
 
-| Original (Node/TS) | Reconstrucción (Python) | Motivo |
-| --- | --- | --- |
-| 4 tablas SQLite (1 raíz + 3 de detalle 1:1) | 1 tabla `documentos` con JSON embebido | Menos JOINs, misma información, CRUD simple |
-| 12 estados del ciclo de vida | 8 estados requeridos | Consolidación pedida; errores tempranos → `DESCARTADO` + `error_msg` + cuarentena |
-| Fastify + rutas HTTP + WebSocket + cliente Svelte 5 | NiceGUI en el mismo proceso | Un solo lenguaje/proceso; el refresco "en vivo" se logra con `ui.timer` + SQLite local |
-| Subproceso CLI `pdf_worker.py` (spawn por archivo) | `core/pdf_engine.py` en memoria | Sin IPC JSON/stdin, sin coste de arranque por documento |
-| Clean Architecture (8 interfaces/puertos + DI manual) | Módulos concretos + 1 orquestador | Legible y mantenible por un solo desarrollador |
-| Vigilancia por polling puro (SMB) | **watchdog** + poll de respaldo | Requisito explícito de `watchdog`, conservando la robustez ante volúmenes de red |
-| Búsqueda semántica local (Puerto 7, P1 opcional: `@xenova/transformers`, modelo `bge-m3` de cientos de MB) | **No migrada** | Fase complementaria opcional del PRD; su peso contradice el objetivo de ligereza. El match exacto por folio/hash y el buscador en vivo cubren el caso principal. Puede re-añadirse como módulo sin tocar el pipeline |
+```text
+main.py                 Punto de entrada, composición y rutas de archivos
+config.py               Carga centralizada de .env y rutas de datos
+database.py             Esquema SQLite y repositorio de documentos
+core/                   Pipeline, PDF, IA, archivos, watcher y Sheets
+rpa/                    Adaptadores Playwright y simulación
+ui/                     Bandeja y revisión HITL con NiceGUI
+storage/                Directorios de tránsito documental versionados vacíos
+packaging/              PyInstaller, PowerShell e Inno Setup para Windows
+.github/workflows/      Construcción y publicación del instalador
+```
 
-**Garantías operativas conservadas**: deduplicación atómica por hash (única restricción
-SQLite), cuarentena con `.error.txt`, verificación de hash post-escritura del canónico,
-concurrencia optimista por `version`, Sheets jamás bloquea el `COMPLETADO`, reintentos RPA
-con backoff y clasificación de errores transitorios, prefijo `{epoch_ms}_` para distinguir
-canal WEB del escáner ante el vigilante, estabilidad de archivo (tamaño/mtime) antes de ingerir.
-
----
-
-## 9. Solución de problemas frecuentes
+## Contribución y operación
 
 | Síntoma | Causa y remedio |
 | --- | --- |
@@ -351,10 +328,13 @@ canal WEB del escáner ante el vigilante, estabilidad de archivo (tamaño/mtime)
 | `NAVEGADOR_NO_DISPONIBLE` | Ni Edge del sistema ni el Chromium empaquetado están disponibles — instale Microsoft Edge, o reinstale marcando el componente "Automatización RPA", o cambie `RPA_MODO=simulacion` |
 | (Instalador Windows) No abre el navegador solo | Ábralo manualmente en `http://127.0.0.1:8080`; revise la ventana de consola de la app por errores |
 | Botón "Confirmar seleccionados" omite un documento | Normal si no está en `PENDIENTE_REVISION` o si su método de extracción es `HEURISTICA_FALLBACK` (requiere edición manual campo por campo) — el motivo exacto queda en la notificación |
+1. Cree una rama de trabajo y mantenga los secretos fuera del repositorio.
+2. Cambie la configuración únicamente a través de `Configuracion` y `get_settings()`; los módulos no deben leer el entorno directamente.
+3. Ejecute la comprobación de compilación antes de abrir una revisión.
+4. Para cambios de empaquetado, pruebe el flujo de Windows y verifique tanto la instalación mínima como el componente opcional RPA.
 
----
+El proceso de despliegue disponible es el workflow de instalador: etiquetas con prefijo `v` producen un release, y las ejecuciones manuales producen un artefacto descargable. No hay infraestructura de despliegue de servidor declarada en este repositorio.
 
-## 10. Licencia y mantenimiento
+## Licencia
 
-Propiedad intelectual de la División de Servicios Administrativos (DSA) del Hospital Civil de
-Guadalajara. Uso interno restringido — prohibida su divulgación o implementación externa.
+Propiedad intelectual de la División de Servicios Administrativos del Hospital Civil de Guadalajara. Uso interno restringido; no se autoriza su divulgación ni implementación externa.
