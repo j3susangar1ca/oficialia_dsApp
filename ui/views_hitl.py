@@ -5,7 +5,7 @@ ui/views_hitl.py — Revisión asistida Human-in-the-Loop (split-screen 50/50).
 
 Migración del `HitlReviewView.svelte` original:
 
-    - Panel izquierdo: visor de PDF integrado (sirve el archivo actual del
+    - Panel izquierdo: visor de PDF integrado y persistente (sirve el archivo actual del
       documento vía la ruta `/pdf/{id}` registrada en main.py) con
       navegación de páginas y apertura en pestaña nueva.
     - Panel derecho: formulario reactivo precargado con la extracción de
@@ -16,6 +16,8 @@ Migración del `HitlReviewView.svelte` original:
         [Reintentar RPA]        → reinyección en ERROR_RPA (sin reextraer)
     - Banners de contexto: ERROR_RPA (con motivo y reintento), COMPLETADO
       (folio de acuse + evidencia) y DESCARTADO (motivo auditable).
+    - Atajos seguros: Alt+A confirma y Alt+R abre el descarte, sin interferir
+      con la captura dentro de los campos del formulario.
     - Mientras el documento está EJECUTANDO_RPA, la página se auto-refresca
       para mostrar el desenlace sin intervención del capturista.
 """
@@ -123,17 +125,34 @@ def pagina_revision(doc_id: str) -> None:
                         if documento.origen.value == "SCANNER_ADF":
                             ui.label("· escáner").classes("text-[11px] text-slate-400")
 
-        # ---------------- Split-screen 50/50 ----------------
-        with ui.splitter(value=50).classes("w-full flex-1 min-h-0").props("limits=30,70") as split:
+        # El PDF recibe más espacio, mientras el panel lateral conserva un
+        # ancho cómodo para validar sin desplazamiento horizontal.
+        with ui.splitter(value=58).classes("w-full flex-1 min-h-0 rounded-lg border border-slate-200").props("limits=38,68") as split:
             # ==== PANEL IZQUIERDO: visor de PDF ====
             with split.before:
                 _panel_visor(documento)
 
             # ==== PANEL DERECHO: formulario + acciones ====
             with split.after:
-                _panel_formulario(
+                acciones = _panel_formulario(
                     documento, borrador, capturista, estado_visto, pipeline, config
                 )
+
+    async def _atajo_revision(evento) -> None:
+        """Acciones rápidas, ignoradas automáticamente cuando se edita un campo."""
+        if not evento.action.keydown or evento.action.repeat or not evento.modifiers.alt:
+            return
+        tecla = evento.key.name.lower()
+        if tecla == "a" and "aprobar" in acciones:
+            await acciones["aprobar"]()
+        elif tecla == "r" and "rechazar" in acciones:
+            acciones["rechazar"]()
+
+    ui.keyboard(_atajo_revision, repeating=False)
+    if documento.estado in ESTADOS_EDITABLES:
+        ui.label("Atajos: Alt+A confirmar · Alt+R descartar").classes(
+            "fixed-bottom-right q-ma-md q-px-sm q-py-xs rounded bg-slate-100 text-[11px] text-slate-500"
+        )
 
     # Auto-refresco mientras el RPA corre en segundo plano.
     if documento.estado == EstadoDocumento.EJECUTANDO_RPA:
@@ -150,13 +169,13 @@ def _panel_visor(documento: DocumentoRegistro) -> None:
     def _marco_html(numero: int) -> str:
         """Iframe del visor (navegación por fragmento #page=N del visor nativo)."""
         return (
-            f'<iframe src="/pdf/{documento.id}#page={numero}" '
-            'style="width:100%;height:100%;border:0;background:#f1f5f9" '
+            f'<iframe src="/pdf/{documento.id}#page={numero}&view=FitH" '
+            'style="width:100%;height:100%;border:0;background:#f1f5f9" loading="eager" '
             'title="Visor de documento"></iframe>'
         )
 
-    with ui.column().classes("w-full h-full no-wrap gap-2 q-pa-sm"):
-        with ui.row().classes("items-center justify-between no-wrap w-full"):
+    with ui.column().classes("w-full h-full no-wrap gap-2 q-pa-sm bg-slate-50"):
+        with ui.row().classes("items-center justify-between no-wrap w-full q-px-xs"):
             with ui.row().classes("items-center gap-1"):
                 ui.button(icon="chevron_left").props("flat round dense").bind_enabled_from(
                     pagina_actual, "numero", backward=lambda n: n > 1
@@ -167,12 +186,12 @@ def _panel_visor(documento: DocumentoRegistro) -> None:
                 ui.button(icon="chevron_right").props("flat round dense").bind_enabled_from(
                     pagina_actual, "numero", backward=lambda n: n < total_paginas
                 ).on_click(lambda: _mover_pagina(1))
-            ui.link("Abrir en pestaña nueva", f"/pdf/{documento.id}", new_tab=True).classes(
-                "text-xs text-primary"
-            )
+            with ui.row().classes("items-center gap-1"):
+                ui.label("Visor PDF").classes("text-[11px] font-medium text-slate-500")
+                ui.link("Abrir", f"/pdf/{documento.id}", new_tab=True).classes("text-xs text-primary")
 
         visor = ui.html(_marco_html(1)).classes(
-            "w-full flex-1 rounded-lg border border-slate-200 overflow-hidden bg-slate-100"
+            "w-full flex-1 rounded-md border border-slate-200 overflow-hidden bg-slate-100 shadow-sm"
         ).style("min-height:0")
 
         def _mover_pagina(delta: int) -> None:
@@ -192,7 +211,7 @@ def _panel_formulario(
     estado_visto: dict,
     pipeline,
     config,
-) -> None:
+) -> dict[str, Callable]:
     editable = documento.estado in ESTADOS_EDITABLES
     entradas: dict[str, ui.input] = {}
 
@@ -256,7 +275,9 @@ def _panel_formulario(
 
             # ---- Acciones ----
             ui.separator().classes("w-full")
-            with ui.row().classes("w-full items-center justify-end gap-2 no-wrap"):
+            with ui.row().classes("w-full items-center justify-end gap-2 no-wrap").style(
+                "position:sticky;bottom:0;background:white;padding:8px 0;z-index:1"
+            ):
                 if documento.estado == EstadoDocumento.ERROR_RPA:
                     ui.button("Reintentar RPA", icon="restart_alt").props(
                         "color=primary outline no-caps"
@@ -265,11 +286,11 @@ def _panel_formulario(
                 if documento.estado in ESTADOS_EDITABLES:
                     ui.button("Descartar", icon="delete").props(
                         "color=negative outline no-caps"
-                    ).on_click(lambda: _abrir_dialogo_descartar())
+                    ).on_click(lambda: _abrir_dialogo_descartar()).tooltip("Alt+R")
 
                     ui.button("Confirmar y Registrar", icon="task_alt").props(
                         "color=primary no-caps"
-                    ).on_click(lambda: _confirmar())
+                    ).on_click(lambda: _confirmar()).tooltip("Alt+A")
 
             if not editable:
                 ui.label(
@@ -358,6 +379,11 @@ def _panel_formulario(
             return
         ui.notify("Reinyección en la Intranet en curso…", type="positive", position="top")
         ui.navigate.to(f"/revision/{documento.id}")
+
+    acciones: dict[str, Callable] = {}
+    if documento.estado in ESTADOS_EDITABLES:
+        acciones = {"aprobar": _confirmar, "rechazar": _abrir_dialogo_descartar}
+    return acciones
 
 
 # ----------------------------------------------------------------------
