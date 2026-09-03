@@ -12,11 +12,13 @@ dist/
 
 # Secretos
 .env
+credentials.json
 
 # Datos operativos locales
 data/*.db
 data/*.db-*
 data/tablero_local.csv
+data/sheets_backup.csv
 logs/
 
 # Pruebas

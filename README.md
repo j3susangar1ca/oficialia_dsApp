@@ -44,8 +44,12 @@
    el instalador. Modo dual `RPA_MODO=simulacion|playwright` y `RPA_HEADLESS=false` para ver el
    navegador.
 8. **Sincronización opcional a Google Sheets** (cuenta de servicio) con el layout A:M del tablero
-   de control; sin credenciales funciona en **stub local** (`data/tablero_local.csv`).
-9. **Operación diagnosticable**: log rotativo a archivo (`logs/app.log`, 10 MB × 5 respaldos,
+   de control; sin credenciales funciona en **stub local** (`data/sheets_backup.csv`).
+9. **Exportación a carpeta compartida de red (SMB)**: al confirmar en HITL, copia (best-effort,
+   nunca bloquea el flujo) el PDF canónico a `SMB_EXPORT_DIR` con nombre dinámico
+   `{folio}_{fecha}_{remitente}_{asunto}.pdf`; un fallo de permisos o de red en el recurso
+   compartido solo queda registrado en el log.
+10. **Operación diagnosticable**: log rotativo a archivo (`logs/app.log`, 10 MB × 5 respaldos,
    `core/logging_setup.py`) además de la consola, y esquema SQLite versionado
    (`PRAGMA user_version` + migraciones incrementales en `database.py`) para que actualizar la
    app sobre una instalación existente no corrompa ni pierda la base de datos de un cliente.
@@ -214,12 +218,17 @@ Copie [`.env.example`](.env.example) a `.env`; `config.py` es la fuente única d
 | Datos | `DATABASE_PATH`, `STORAGE_ROOT` | `data/oficialia.db` y `storage/` |
 | IA | `GEMINI_API_KEY`, `GEMINI_MODELO`, `GEMINI_TIMEOUT_MS`, `GEMINI_REINTENTOS`, `RENDER_DPI`, `RENDER_MAX_PAGINAS` | Sin `GEMINI_API_KEY`, el documento se descarta de forma trazable; modelo `gemini-2.5-flash` |
 | Watchfolder | `WATCHFOLDER_ENABLED`, `WATCHFOLDER_INTERVALO_MS`, `WATCHFOLDER_ESTABILIDAD_MS`, `WATCHFOLDER_MAX_REINTENTOS` | Activo, sondeo de respaldo cada 5 s |
-| RPA | `RPA_MODO`, `RPA_HEADLESS`, `RPA_TIMEOUT_MS`, `RPA_REINTENTOS`, `RPA_SIMULACION_FALLAR` | `simulacion`, sin navegador real |
-| Intranet | `INTRANET_BASE_URL`, `INTRANET_HTTP_USERNAME`, `INTRANET_HTTP_PASSWORD`, `RPA_OFICIALIA_CVE`, `RPA_HCG_DEPENDENCIA_CVE`, `RPA_SECCION_CVE` | URL institucional configurada en la plantilla; credenciales y CVE vacíos |
+| RPA | `RPA_MODO`, `RPA_HEADLESS`, `RPA_TIMEOUT_MS`, `RPA_REINTENTOS`, `RPA_SIMULACION_FALLAR` | `playwright` (real) en esta instalación; fije `RPA_MODO=simulacion` para pruebas locales sin navegador |
+| Intranet | `INTRANET_BASE_URL`, `INTRANET_HTTP_USERNAME`, `INTRANET_HTTP_PASSWORD`, `RPA_USUARIO`, `RPA_PASSWORD`, `RPA_OFICIALIA_CVE`, `RPA_HCG_DEPENDENCIA_CVE`, `RPA_SECCION_CVE` | URL institucional configurada en la plantilla; `RPA_USUARIO`/`RPA_PASSWORD` son la cuenta institucional para el login SII/Webix (usadas como HTTP credentials si `INTRANET_HTTP_USERNAME`/`PASSWORD` se omiten) |
 | Resiliencia RPA | `RPA_SELECTOR_TIMEOUT_MS`, `RPA_WEBIX_INIT_TIMEOUT_MS`, `RPA_REINTENTO_BASE_MS`, `RPA_REINTENTO_MAX_MS`, `RPA_SESSION_TTL_MIN`, `RPA_JITTER_FACTOR` | Valores seguros internos de `config.py` |
-| Sheets | `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SHEETS_SHEET_NAME`, `GOOGLE_SERVICE_ACCOUNT_JSON` | Sin destino o credenciales se escribe `data/tablero_local.csv` |
+| Exportación SMB | `SMB_EXPORT_DIR` | Copia best-effort del PDF canónico a la carpeta de red al confirmar en HITL; vacío desactiva la exportación |
+| Sheets | `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SHEETS_SHEET_NAME`, `GOOGLE_SERVICE_ACCOUNT_JSON` | Sin destino o credenciales se escribe `data/sheets_backup.csv` |
 
-También se admite `GOOGLE_APPLICATION_CREDENTIALS` para señalar un archivo de credenciales de Google fuera del `.env`. Configure al menos `GEMINI_API_KEY` para pasar de ingesta a revisión; para producción, reemplace además `[CONFIGURAR_CREDENCIALES_RPA]` y `[CONFIGURAR_CUENTA_SERVICIO_SHEETS]` según corresponda.
+También se admite `GOOGLE_APPLICATION_CREDENTIALS`, o un archivo `credentials.json` junto a los datos de la app, para señalar credenciales de Google fuera del `.env`. Configure al menos `GEMINI_API_KEY` para pasar de ingesta a revisión; para producción, reemplace además `[CONFIGURAR_CREDENCIALES_RPA]` y `[CONFIGURAR_CUENTA_SERVICIO_SHEETS]` según corresponda.
+
+> **Secretos**: `GEMINI_API_KEY`, `RPA_PASSWORD` y `GOOGLE_SERVICE_ACCOUNT_JSON` no tienen valor por
+> defecto en `config.py` ni en `.env.example` (ambos se versionan en git) — captúrelos únicamente
+> en su `.env` local, que ya está en `.gitignore`.
 
 ## Uso de la interfaz y rutas locales
 
@@ -275,11 +284,12 @@ de IA simulado. `pytest.ini` fija `testpaths = tests`.
 | Módulo | Variable | Valores | Sin configurar |
 | --- | --- | --- | --- |
 | Extracción IA | `GEMINI_API_KEY` | clave real | **Falla honestamente**: documento en `DESCARTADO` con `AI_NO_CONFIGURADA` y archivo en cuarentena (no hay stub de IA para no falsear datos) |
-| RPA | `RPA_MODO` | `simulacion` \| `playwright` | `simulacion`: acuse sintético `HCG-OP-SIM-*`, sin navegador |
+| RPA | `RPA_MODO` | `simulacion` \| `playwright` | `playwright` en esta instalación; `simulacion`: acuse sintético `HCG-OP-SIM-*`, sin navegador |
 | RPA navegador (ventana) | `RPA_HEADLESS` | `false` (visible) \| `true` | `false` — ver el navegador al inyectar |
 | RPA navegador (motor) | `RPA_NAVEGADOR` | `auto` \| `msedge` \| `chromium` | `auto` — Edge del sistema primero, Chromium empaquetado como respaldo |
 | Forzar fallo RPA simulado | `RPA_SIMULACION_FALLAR` | `true` \| `false` | `false` — útiles para ejercitar `ERROR_RPA` + reintento |
-| Google Sheets | `GOOGLE_SHEETS_SPREADSHEET_ID` + credenciales | Service Account (JSON en una línea o `GOOGLE_APPLICATION_CREDENTIALS`) | **Stub local**: `data/tablero_local.csv` |
+| Exportación SMB | `SMB_EXPORT_DIR` | ruta UNC \| vacío | Copia best-effort del PDF canónico al confirmar en HITL; vacío desactiva la exportación |
+| Google Sheets | `GOOGLE_SHEETS_SPREADSHEET_ID` + credenciales | Service Account (JSON en una línea, `GOOGLE_APPLICATION_CREDENTIALS` o `credentials.json`) | **Stub local**: `data/sheets_backup.csv` |
 | Watchfolder | `WATCHFOLDER_ENABLED` | `true` \| `false` | `true` |
 
 Layout del tablero de Sheets (fila 1 = encabezados, gestionados por usted):
