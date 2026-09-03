@@ -37,7 +37,53 @@
 
 ---
 
-## 2. Arquitectura (monolito modular, un solo proceso)
+## 2. Instalación en Windows (usuario final — sin Python, sin nada que instalar a mano)
+
+Para el personal de la DSA que solo va a **usar** el sistema en un equipo Windows 10/11,
+no hace falta clonar el repositorio, instalar Python ni ejecutar `pip install`:
+
+1. Vaya a la pestaña **[Releases](../../releases)** de este repositorio (o a la pestaña
+   **Actions → Instalador de Windows → última ejecución → Artifacts**, si aún no hay una
+   versión etiquetada) y descargue **`OficialiaDigitalDSA-Setup.exe`**.
+2. Ejecútelo y siga el asistente (pide permisos de administrador **solo durante la
+   instalación**, para escribir en `Archivos de programa` y crear la carpeta de datos
+   compartida). Puede omitir el componente **"Automatización RPA"** (~300 MB, el
+   navegador Chromium) si de momento solo va a usar el modo simulación/HITL.
+3. Al terminar, el propio instalador ofrece abrir la aplicación — el navegador se abre
+   solo en `http://127.0.0.1:8080`. También queda un acceso directo en el Escritorio y
+   en el menú Inicio.
+4. Para extracción real con Gemini (o RPA/Sheets reales), abra
+   **Inicio → Oficialía Digital DSA → Configuración (.env)**, capture las claves/credenciales
+   necesarias y reinicie la aplicación. **Esto es lo único que el instalador no puede
+   resolver por usted**: la API key de Gemini y las credenciales institucionales son
+   secretos propios de cada instalación, no dependencias de software.
+5. Sin tocar nada, el sistema arranca igualmente en modo seguro: RPA simulado
+   (acuses sintéticos `HCG-OP-SIM-*`) y Google Sheets en stub local — sirve para
+   explorar la bandeja y el flujo HITL antes de configurar credenciales reales.
+
+Todo queda instalado en `Archivos de programa\OficialiaDigitalDSA\` (código, de solo
+lectura) y los datos (`oficialia.db`, PDFs procesados, `.env`) en
+`%ProgramData%\OficialiaDigitalDSA\` (con permisos de escritura para el usuario estándar
+que ejecuta la app — no requiere privilegios de administrador en el uso diario).
+Desinstalar desde *Agregar o quitar programas* **no borra** esa carpeta de datos: la BD y
+los PDFs institucionales quedan a salvo.
+
+> **¿Cómo se genera ese instalador?** `packaging/oficialia.spec` (PyInstaller) +
+> `packaging/oficialia.iss` (Inno Setup) + `packaging/build_windows.ps1` los ensamblan en
+> un único `.exe` que ya trae Python, todas las dependencias de `requirements.txt` y
+> (opcionalmente) el navegador Chromium de Playwright — el usuario final nunca instala
+> nada de eso por separado. El workflow `.github/workflows/build-windows-installer.yml`
+> construye este instalador automáticamente en un runner de Windows de GitHub Actions
+> (PyInstaller no compila de forma cruzada) cada vez que se publica un tag `v*`, y lo deja
+> tanto como artefacto de la ejecución como adjunto de la Release — nadie necesita un
+> equipo Windows propio para publicar una nueva versión. Vea el detalle en
+> `packaging/build_windows.ps1`. **No se incluye Tesseract/OCR** (dependencia opcional y
+> auxiliar de `core/pdf_engine.py`: el sistema funciona igual sin ella, la extracción
+> corre por Gemini) — si el IT institucional lo requiere, puede instalarse aparte.
+
+---
+
+## 3. Arquitectura (monolito modular, un solo proceso)
 
 ```text
                  ┌────────────────────────────────────────────────────────┐
@@ -80,6 +126,13 @@ oficialia_dsa/
 ├── main.py               # Punto de entrada único
 ├── requirements.txt      # Dependencias exactas
 ├── .env.example          # Plantilla de variables de entorno
+├── packaging/            # Instalador Windows (ver sección 2)
+│   ├── oficialia.spec    # Bundle PyInstaller (onedir)
+│   ├── oficialia.iss     # Instalador Inno Setup
+│   ├── build_windows.ps1 # Orquesta todo el proceso de build
+│   └── requirements-build.txt
+├── .github/workflows/
+│   └── build-windows-installer.yml  # Construye el instalador en CI (runner Windows)
 └── README.md
 ```
 
@@ -91,7 +144,7 @@ oficialia_dsa/
 
 ---
 
-## 3. Máquina de estados y ciclo de vida físico
+## 4. Máquina de estados y ciclo de vida físico
 
 ```text
  INGESTADO ─▶ EN_PREPROCESO ─▶ EXTRAYENDO ─▶ PENDIENTE_REVISION
@@ -119,15 +172,19 @@ aísla en `04_errores` con motivo `DUPLICATE_HASH_DETECTED`.
 
 ---
 
-## 4. Requisitos e instalación (paso a paso)
+## 5. Instalación desde código fuente (desarrollo, o cualquier plataforma sin el instalador)
 
-### 4.1 Requisitos previos
+> Si solo va a **usar** el sistema en Windows 10/11, no necesita nada de esta sección:
+> vea la sección 2. Esta ruta es para desarrollo, contribución al código, o para
+> ejecutar el sistema en Linux/macOS (el instalador empaquetado es exclusivo de Windows).
+
+### 5.1 Requisitos previos
 
 - **Python 3.11+** (probado con 3.12) con `venv` y `pip`.
 - (Solo para RPA real) acceso LAN/VPN a la Intranet institucional y credenciales.
 - (Solo para IA real) una API key de Google AI Studio (Gemini).
 
-### 4.2 Crear el entorno virtual e instalar dependencias
+### 5.2 Crear el entorno virtual e instalar dependencias
 
 ```bash
 # 1) Ubicarse en la raíz del proyecto
@@ -141,7 +198,7 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4.3 Instalar el navegador de Playwright (solo para RPA real)
+### 5.3 Instalar el navegador de Playwright (solo para RPA real)
 
 ```bash
 # Descarga el Chromium gestionado por Playwright (~150 MB, una sola vez)
@@ -150,7 +207,7 @@ playwright install chromium
 
 > En modo `RPA_MODO=simulacion` (default) **no** es necesario instalar el navegador.
 
-### 4.4 Configurar variables de entorno
+### 5.4 Configurar variables de entorno
 
 ```bash
 cp .env.example .env
@@ -159,7 +216,7 @@ cp .env.example .env
 chmod 600 .env     # recomendado en el servidor institucional
 ```
 
-### 4.5 Ejecutar el sistema (comando único)
+### 5.5 Ejecutar el sistema (comando único)
 
 ```bash
 python main.py
@@ -173,7 +230,7 @@ Abrir en el navegador: **http://localhost:8080** (o `APP_PORT` del `.env`).
 
 ---
 
-## 5. Modos de operación
+## 6. Modos de operación
 
 | Módulo | Variable | Valores | Sin configurar |
 | --- | --- | --- | --- |
@@ -195,7 +252,7 @@ L: Folio acuse RPA | M: RPA exitoso
 
 ---
 
-## 6. Mapeo de campos del RPA (Intranet Webix `op_ningr.fwx`)
+## 7. Mapeo de campos del RPA (Intranet Webix `op_ningr.fwx`)
 
 | Campo Webix (view id) | Origen del dato |
 | --- | --- |
@@ -220,7 +277,7 @@ página (todos los frames) o la URL; screenshot completo en
 
 ---
 
-## 7. Decisiones de consolidación (original → Python)
+## 8. Decisiones de consolidación (original → Python)
 
 | Original (Node/TS) | Reconstrucción (Python) | Motivo |
 | --- | --- | --- |
@@ -240,7 +297,7 @@ canal WEB del escáner ante el vigilante, estabilidad de archivo (tamaño/mtime)
 
 ---
 
-## 8. Solución de problemas frecuentes
+## 9. Solución de problemas frecuentes
 
 | Síntoma | Causa y remedio |
 | --- | --- |
@@ -249,11 +306,13 @@ canal WEB del escáner ante el vigilante, estabilidad de archivo (tamaño/mtime)
 | `FORMULARIO_WEBIX_TIMEOUT` | La Intranet no expone `op_ningr.fwx` en el iframe o los `view id` cambiaron — revise selectores |
 | El visor PDF no muestra el documento | El navegador debe tener visor PDF nativo (Chrome/Edge/Firefox modernos lo traen); use «Abrir en pestaña nueva» |
 | Watcher no detecta archivos sobre montaje SMB | Confirme `WATCHFOLDER_ENABLED=true`; el poll de respaldo (cada 5 s) barre el directorio de todos modos |
-| Puerto ocupado | Cambie `APP_PORT` en `.env` |
+| Puerto ocupado | Cambie `APP_PORT` en `.env` (o en `%ProgramData%\OficialiaDigitalDSA\.env` si usa el instalador Windows) |
+| (Instalador Windows) RPA falla con "Executable doesn't exist" | Se omitió el componente "Automatización RPA" al instalar — reinstale marcándolo, o cambie `RPA_MODO=simulacion` |
+| (Instalador Windows) No abre el navegador solo | Ábralo manualmente en `http://127.0.0.1:8080`; revise la ventana de consola de la app por errores |
 
 ---
 
-## 9. Licencia y mantenimiento
+## 10. Licencia y mantenimiento
 
 Propiedad intelectual de la División de Servicios Administrativos (DSA) del Hospital Civil de
 Guadalajara. Uso interno restringido — prohibida su divulgación o implementación externa.

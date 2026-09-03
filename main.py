@@ -38,7 +38,7 @@ logging.getLogger("nicegui").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logger = logging.getLogger("oficialia.main")
 
-from config import get_settings  # noqa: E402
+from config import EMPAQUETADO, get_settings  # noqa: E402
 from core.ai_extractor import ExtractorMetadatos  # noqa: E402
 from core.file_manager import GestorArchivos  # noqa: E402
 from core.models import DocumentoRegistro, EstadoDocumento, ResultadoRpa  # noqa: E402
@@ -136,6 +136,14 @@ async def _arrancar_servicios_fondo() -> None:
     for linea in configuracion.resumen_arranque():
         logger.info("%s", linea)
     logger.info("Interfaz lista en http://%s:%d", "localhost", configuracion.app_port)
+
+    if EMPAQUETADO:
+        # Ejecutable instalado (ver packaging/): no hay consola visible para
+        # el usuario final, así que se abre el navegador automáticamente en
+        # vez de esperar a que alguien escriba la URL a mano.
+        import webbrowser
+
+        webbrowser.open(f"http://127.0.0.1:{configuracion.app_port}/")
 
 
 @app.on_shutdown

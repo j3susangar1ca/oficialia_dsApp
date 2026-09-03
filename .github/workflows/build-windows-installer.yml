@@ -1,0 +1,55 @@
+name: Instalador de Windows
+
+# Construye el instalador de un solo archivo (OficialiaDigitalDSA-Setup.exe)
+# en un runner de Windows: el usuario final lo descarga desde la pestaña
+# "Actions" (artefacto de cada ejecución) o desde "Releases" (al empujar un
+# tag v*) y lo ejecuta — sin instalar Python, pip, Playwright ni ninguna
+# otra dependencia por su cuenta.
+#
+# PyInstaller no compila de forma cruzada: por eso este workflow corre en
+# `windows-latest` y no en Linux, aunque el resto del repo se desarrolle
+# fuera de Windows.
+
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}   # permite lanzarlo a mano desde la pestaña Actions
+
+permissions:
+  contents: write   # necesario para adjuntar el instalador a un Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Construir la aplicación y el instalador
+        shell: pwsh
+        run: .\packaging\build_windows.ps1
+
+      - name: Publicar el instalador como artefacto de esta ejecución
+        uses: actions/upload-artifact@v4
+        with:
+          name: OficialiaDigitalDSA-Setup
+          path: dist\installer\OficialiaDigitalDSA-Setup.exe
+          if-no-files-found: error
+
+      - name: Adjuntar el instalador a la Release (solo en tags v*)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist\installer\OficialiaDigitalDSA-Setup.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

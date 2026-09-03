@@ -3,22 +3,34 @@ SISTEMA OFICIALIA-DIGITAL-DSA (reconstrucción 100% Python)
 ==========================================================
 config.py — Configuración centralizada de toda la aplicación.
 
-Carga las variables desde un archivo `.env` ubicado en la raíz del proyecto
-(misma carpeta que este archivo) mediante `pydantic-settings`. Ningún otro
-módulo lee variables de entorno directamente: todos importan `get_settings()`.
+Carga las variables desde un archivo `.env` mediante `pydantic-settings`.
+Ningún otro módulo lee variables de entorno directamente: todos importan
+`get_settings()`.
 
 Diseño:
     - Todos los valores tienen un default seguro para desarrollo local
       (RPA y Google Sheets arrancan en modo simulación/stub sin credenciales).
-    - Las rutas se resuelven RELATIVAS a la carpeta del proyecto, no al CWD,
-      para que `python main.py` funcione desde cualquier directorio.
     - `extra='ignore'` tolera variables ajenas en el .env (p. ej. las del
       entorno institucional del servidor).
+
+Ejecutable empaquetado (instalador Windows, ver packaging/):
+    Cuando el proceso corre congelado por PyInstaller (`sys.frozen`), el
+    código vive en una carpeta de solo lectura (típicamente
+    `Archivos de programa\OficialiaDigitalDSA`, instalada por el usuario
+    estándar sin privilegios de escritura). En ese caso las rutas de datos
+    (.env, storage/, data/) se redirigen a `%ProgramData%\OficialiaDigitalDSA`
+    — carpeta de datos por máquina que el instalador crea con permisos de
+    escritura para usuarios estándar — en vez de junto al ejecutable. En
+    modo desarrollo (`python main.py`) el comportamiento no cambia: todo
+    sigue relativo a la carpeta del proyecto, como antes.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -27,15 +39,100 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("oficialia.config")
 
-#: Raíz del proyecto (carpeta que contiene este archivo).
+#: Raíz del código y recursos empaquetados (solo lectura una vez instalado).
 BASE_DIR: Path = Path(__file__).resolve().parent
+
+#: True dentro del ejecutable generado por PyInstaller (ver packaging/oficialia.spec).
+EMPAQUETADO: bool = bool(getattr(sys, "frozen", False))
+
+#: Carpeta de recursos de solo lectura empaquetados junto al código
+#: (con PyInstaller onedir, `sys._MEIPASS` apunta a esa carpeta; en
+#: desarrollo coincide con BASE_DIR). Aquí vive `.env.example`.
+_RECURSOS_DIR: Path = Path(getattr(sys, "_MEIPASS", BASE_DIR))
+
+#: Carpeta del ejecutable instalado (donde el instalador coloca `pw-browsers/`).
+_DIR_EJECUTABLE: Path = Path(sys.executable).resolve().parent if EMPAQUETADO else BASE_DIR
+
+
+def _directorio_datos_predeterminado() -> Path:
+    """
+    Raíz de datos (.env, storage/, data/): junto al proyecto en modo
+    desarrollo; en el ejecutable empaquetado se usa una carpeta de datos
+    por máquina en %ProgramData% (creada con permisos de escritura por el
+    instalador), con reserva a %LOCALAPPDATA% si no fuese escribible.
+    """
+    if not EMPAQUETADO:
+        return BASE_DIR
+    for variable in ("PROGRAMDATA", "LOCALAPPDATA"):
+        base = os.environ.get(variable)
+        if not base:
+            continue
+        candidato = Path(base) / "OficialiaDigitalDSA"
+        try:
+            candidato.mkdir(parents=True, exist_ok=True)
+            sonda = candidato / ".escritura_ok"
+            sonda.write_text("ok", encoding="utf-8")
+            sonda.unlink()
+            return candidato
+        except OSError:
+            continue
+    # Último recurso (no debería alcanzarse en una instalación Windows normal).
+    return _DIR_EJECUTABLE
+
+
+#: Carpeta de datos de lectura/escritura (.env, storage/, data/).
+DATOS_DIR: Path = _directorio_datos_predeterminado()
+
+
+def _sembrar_env_inicial() -> None:
+    """
+    Primera ejecución del empaquetado: si no existe un `.env` en la carpeta
+    de datos, se copia la plantilla `.env.example` empaquetada para que el
+    usuario tenga un archivo a la mano donde capturar GEMINI_API_KEY y
+    credenciales de RPA/Sheets — la aplicación funciona igual sin él (modo
+    simulación, sin IA), pero así queda un archivo descubrible en vez de
+    exigir que el usuario lo cree a mano. Nunca sobrescribe uno existente.
+    """
+    if not EMPAQUETADO:
+        return
+    destino = DATOS_DIR / ".env"
+    origen = _RECURSOS_DIR / ".env.example"
+    if destino.exists() or not origen.is_file():
+        return
+    try:
+        shutil.copyfile(origen, destino)
+        logger.info("Plantilla de configuración creada en %s", destino)
+    except OSError:
+        logger.warning("No se pudo crear %s a partir de la plantilla empaquetada", destino, exc_info=True)
+
+
+def _preparar_navegador_playwright_empaquetado() -> None:
+    """
+    El instalador coloca el Chromium de Playwright en `pw-browsers/`, junto
+    al ejecutable (fuera del bundle de PyInstaller, para no duplicar ~300 MB
+    en cada rebuild). Si existe, se apunta PLAYWRIGHT_BROWSERS_PATH ahí antes
+    de que rpa/playwright_rpa.py importe `playwright.sync_api` — así el modo
+    RPA_MODO=playwright funciona sin que el usuario ejecute
+    `playwright install`. Si el componente no fue instalado (opcional en el
+    instalador), Playwright simplemente reportará el navegador ausente al
+    intentar usarlo — el resto de la aplicación no se ve afectado.
+    """
+    if not EMPAQUETADO:
+        return
+    navegadores = _DIR_EJECUTABLE / "pw-browsers"
+    if navegadores.is_dir():
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(navegadores))
+
+
+_sembrar_env_inicial()
+_preparar_navegador_playwright_empaquetado()
 
 
 class Configuracion(BaseSettings):
     """Parámetros operativos del sistema (fuente única de verdad)."""
 
     model_config = SettingsConfigDict(
-        env_file=BASE_DIR / ".env",
+        env_file=DATOS_DIR / ".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -52,8 +149,8 @@ class Configuracion(BaseSettings):
     # ------------------------------------------------------------------
     # Persistencia (SQLite en modo WAL + rutas de storage)
     # ------------------------------------------------------------------
-    database_path: Path = BASE_DIR / "data" / "oficialia.db"
-    storage_root: Path = BASE_DIR / "storage"
+    database_path: Path = DATOS_DIR / "data" / "oficialia.db"
+    storage_root: Path = DATOS_DIR / "storage"
 
     # ------------------------------------------------------------------
     # Extracción IA — Gemini 2.5 Flash (SDK oficial google-genai)
@@ -157,6 +254,7 @@ class Configuracion(BaseSettings):
     def resumen_arranque(self) -> list[str]:
         """Líneas de diagnóstico que se imprimen al iniciar (transparencia operativa)."""
         lineas = [
+            f"Modo           : {'Ejecutable instalado (Windows)' if EMPAQUETADO else 'Fuente (python main.py)'}",
             f"Almacenamiento : {self.storage_root}",
             f"Base de datos  : {self.database_path}",
             f"Extracción IA  : {'Gemini ' + self.gemini_modelo if self.gemini_api_key else 'SIN GEMINI_API_KEY (la extracción fallará y quedará registrado el error)'}",

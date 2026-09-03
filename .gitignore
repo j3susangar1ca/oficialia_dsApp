@@ -4,6 +4,12 @@ venv/
 __pycache__/
 *.py[cod]
 
+# Empaquetado Windows (packaging/build_windows.ps1) — artefactos generados,
+# nunca se versionan: build/ (venv + Chromium vendorizado + temp de
+# PyInstaller) y dist/ (bundle onedir + instalador final .exe).
+build/
+dist/
+
 # Secretos
 .env
 
