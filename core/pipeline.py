@@ -48,7 +48,13 @@ from core.models import (
     OrigenIngesta,
     ResultadoRpa,
 )
-from core.pdf_engine import ErrorPdf, calcular_sha256, inspeccionar_y_sanitizar, renderizar_paginas
+from core.pdf_engine import (
+    ErrorPdf,
+    calcular_sha256,
+    extraer_texto_ocr,
+    inspeccionar_y_sanitizar,
+    renderizar_paginas,
+)
 from database import RepositorioDocumentos
 
 logger = logging.getLogger("oficialia.pipeline")
@@ -150,7 +156,19 @@ class FlujoDocumental:
             paginas = renderizar_paginas(
                 sanitizado, dpi=self.config.render_dpi, max_paginas=self.config.render_max_paginas
             )
-            metadatos = self.extractor.extraer_de_paginas(paginas, anio_contexto=datetime.now().year)
+            # Referencia OCR auxiliar (Tesseract): mejora la lectura sin ser
+            # nunca un requisito — se degrada con gracia si la dependencia o
+            # el binario no están instalados (ver core.pdf_engine).
+            try:
+                textos_ocr = extraer_texto_ocr(
+                    sanitizado, max_paginas=self.config.render_max_paginas
+                )
+            except Exception:  # noqa: BLE001 — el OCR auxiliar nunca debe abortar la ingesta
+                logger.warning("OCR auxiliar omitido para %s", registro.id, exc_info=True)
+                textos_ocr = None
+            metadatos = self.extractor.extraer_de_paginas(
+                paginas, anio_contexto=datetime.now().year, textos_ocr=textos_ocr
+            )
 
             registro = self.repo.guardar_metadatos_extraidos(
                 registro.id, metadatos, EstadoDocumento.PENDIENTE_REVISION, version_esperada=registro.version

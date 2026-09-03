@@ -13,17 +13,34 @@ Reglas heredadas 1:1 del worker original:
     - Rechazo de PDFs con contraseña (needs_pass) y de documentos sin páginas.
     - Sanitización: regeneración del árbol xref (garbage=3, deflate, clean).
     - Render: matriz dpi/72, sin canal alfa, PNG nativo.
+
+Post-procesado de imagen (siempre activo, sin variables de configuración):
+    - `_mejorar_imagen` aplica autocontraste y un realce de nitidez suave a
+      cada render antes de enviarlo al modelo multimodal. Se preserva el
+      color deliberadamente: el prompt institucional distingue elementos
+      por color (sello de recibido, tinta de firma frente a texto impreso)
+      y una conversión a escala de grises degradaría esa señal en vez de
+      mejorarla. Cualquier fallo del post-procesado se absorbe devolviendo
+      el PNG original sin modificar — nunca debe abortar la ingesta.
+    - `extraer_texto_ocr` produce una referencia textual auxiliar vía
+      Tesseract (si está disponible) para complementar la lectura del
+      modelo; se degrada con gracia página por página si el binario o la
+      dependencia no están instalados, sin interrumpir el pipeline.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from dataclasses import dataclass
+from io import BytesIO
 
 import pymupdf
 
 from core.models import DimensionPagina, InfoPreproceso
+
+logger = logging.getLogger("oficialia.pdf")
 
 
 class ErrorPdf(Exception):
@@ -110,11 +127,47 @@ def inspeccionar_y_sanitizar(
         doc.close()
 
 
+def _mejorar_imagen(png_bytes: bytes) -> bytes:
+    """
+    Aumenta el contraste local (autocontraste, recortando el 1% de outliers
+    por canal) y aplica un realce de nitidez moderado (Unsharp Mask) para
+    favorecer la lectura OCR del modelo multimodal ante sellos tenues,
+    fotocopias o digitalizaciones de fax de baja calidad.
+
+    Preserva el modo de color original (nunca convierte a escala de grises):
+    el protocolo institucional discrimina campos por color (p. ej. sello de
+    recibido frente a tinta de firma), y perder esa señal sería contrario
+    al objetivo de mejorar la extracción. Ante cualquier fallo del
+    post-procesado (Pillow ausente, imagen corrupta) se degrada con gracia
+    devolviendo el PNG original — nunca debe abortar la ingesta.
+    """
+    try:
+        from PIL import Image, ImageFilter, ImageOps
+    except ImportError:
+        logger.warning("Pillow no está instalado: se omite el realce de imagen")
+        return png_bytes
+
+    try:
+        imagen = Image.open(BytesIO(png_bytes))
+        modo_original = imagen.mode
+        realzada = ImageOps.autocontrast(imagen.convert("RGB"), cutoff=1)
+        realzada = realzada.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=3))
+        if modo_original != "RGB":
+            realzada = realzada.convert(modo_original)
+        salida = BytesIO()
+        realzada.save(salida, format="PNG")
+        return salida.getvalue()
+    except Exception as exc:  # noqa: BLE001 — el realce es una mejora, nunca un requisito
+        logger.warning("Realce de imagen omitido por error de post-procesado: %s", exc)
+        return png_bytes
+
+
 def renderizar_paginas(
     buffer: bytes, *, dpi: int = 300, max_paginas: int = 10
 ) -> list[PaginaRenderizada]:
     """
-    Renderiza hasta `max_paginas` páginas a PNG de alta resolución.
+    Renderiza hasta `max_paginas` páginas a PNG de alta resolución y aplica
+    siempre el realce de `_mejorar_imagen` antes de entregarlas a la IA.
 
     El límite de páginas reproduce el presupuesto del pipeline original
     (10 páginas por inferencia) para acotar el costo de tokens de la IA.
@@ -126,9 +179,55 @@ def renderizar_paginas(
         return [
             PaginaRenderizada(
                 numero=indice + 1,
-                png=doc.load_page(indice).get_pixmap(matrix=matriz, alpha=False).tobytes("png"),
+                png=_mejorar_imagen(
+                    doc.load_page(indice).get_pixmap(matrix=matriz, alpha=False).tobytes("png")
+                ),
             )
             for indice in range(limite)
         ]
+    finally:
+        doc.close()
+
+
+def extraer_texto_ocr(
+    buffer: bytes, *, dpi: int = 200, max_paginas: int = 10, idioma: str = "spa"
+) -> dict[int, str]:
+    """
+    Extrae texto por página mediante OCR (Tesseract) como referencia textual
+    auxiliar para el modelo multimodal. Nunca interrumpe el pipeline: ante
+    cualquier fallo (dependencia `pytesseract` ausente, binario `tesseract`
+    no instalado, página ilegible) registra advertencia y continúa,
+    devolviendo únicamente lo que pudo leerse ({} si no pudo leer nada).
+
+    :param dpi: resolución del render intermedio para el OCR (menor que la
+        de `renderizar_paginas`: Tesseract no necesita 300 dpi para operar
+        y esto evita duplicar el costo de render en cada ingesta).
+    """
+    try:
+        import pytesseract
+    except ImportError:
+        logger.warning("pytesseract no está instalado: se omite el OCR auxiliar")
+        return {}
+
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning("Pillow no está instalado: se omite el OCR auxiliar")
+        return {}
+
+    doc = _abrir_pdf(buffer)
+    try:
+        matriz = pymupdf.Matrix(dpi / 72, dpi / 72)
+        textos: dict[int, str] = {}
+        for indice in range(min(doc.page_count, max_paginas)):
+            try:
+                pix = doc.load_page(indice).get_pixmap(matrix=matriz, alpha=False)
+                imagen = Image.open(BytesIO(pix.tobytes("png")))
+                texto = pytesseract.image_to_string(imagen, lang=idioma).strip()
+                if texto:
+                    textos[indice + 1] = texto
+            except Exception as exc:  # noqa: BLE001 — binario ausente / página corrupta
+                logger.warning("OCR omitido en página %d: %s", indice + 1, exc)
+        return textos
     finally:
         doc.close()

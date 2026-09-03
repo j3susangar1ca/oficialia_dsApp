@@ -5,10 +5,12 @@ core/ai_extractor.py — Extracción estructurada con Gemini 2.5 Flash.
 
 Puerta única al proveedor de IA mediante el SDK oficial `google-genai`,
 con tipado estricto Pydantic v2 (`MetadatosOficio` como response_schema).
-El system prompt institucional se transcribe VERBATIM del original
+El system prompt institucional parte del original
 (`infrastructure/ai/prompts/systemPromptExtraccionOficios.ts`, fuente
-canónica `docs/system_prompt.md`): cualquier ajuste de protocolo OCR debe
-hacerse primero en la documentación y replicarse aquí.
+canónica `docs/system_prompt.md`) y se le añade la sección [2.9] de
+refuerzo anti-alucinación para los tres campos más sensibles a error de
+lectura (numero_oficio, fecha_emision, remitente_nombre): cualquier ajuste
+de protocolo OCR debe hacerse primero en la documentación y replicarse aquí.
 
 Decisiones heredadas del adaptador original:
     - temperature = 0 (extracción determinista).
@@ -18,12 +20,25 @@ Decisiones heredadas del adaptador original:
       natural → directiva de cierre; el año de contexto viaja ahí (no en el
       system prompt) para mantener el prompt estático y cacheable.
     - Reintentos acotados ante errores transitorios (429 / 5xx / red).
+
+Mejoras incorporadas sobre el adaptador original:
+    - [2.9] refuerzo anti-alucinación en el prompt (ver arriba).
+    - `textos_ocr` opcional: referencia textual auxiliar (Tesseract, vía
+      `pdf_engine.extraer_texto_ocr`) que se adjunta al turno del usuario
+      cuando está disponible, sin afectar el contrato ni el prompt estático.
+    - `_revisar_heuristicas`: auditoría de calidad post-validación que deja
+      constancia en el log de valores estructuralmente válidos pero
+      sospechosos (folio muy corto, fecha fuera de rango plausible,
+      remitente muy corto). Es deliberadamente de solo-lectura: el reporte
+      HITL debe reflejar lo que el modelo realmente devolvió, nunca un
+      valor corregido en silencio.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Optional
 
 from core.models import MetadatosOficio
@@ -56,12 +71,18 @@ c) Para identificar al remitente, prefiera el nombre impreso bajo la rúbrica; l
 d) Ante sellos girados o rotados, tinta desvanecida, fotocopias de baja calidad o fax, escale el esfuerzo de lectura antes de declarar ilegible un campo.
 e) Los anexos y páginas subsecuentes también contienen información extraíble (tablas, expedientes, oficios incrustados): considérelos al evaluar plazo_dias y contiene_datos_sensibles.
 
+[2.9. REFUERZO ANTI-ALUCINACIÓN PARA CAMPOS CRÍTICOS]
+a) numero_oficio: jamás infiera un número de oficio a partir del sello de recibido, de la numeración de páginas, de la fecha o del membrete. Si el folio del emisor no es claramente visible, devuelva exactamente "S/N". No invente secuencias alfanuméricas que "parezcan" oficiales.
+b) fecha_emision: no asuma una fecha basándose en el contexto temporal si el documento no la muestra. Ante una fecha ilegible o ausente, utilice la del sello de recepción solo si es claramente legible; en caso contrario, aplique la contingencia de la sección 4 (1 de enero del año de contexto). No complete dígitos o meses parcialmente legibles.
+c) remitente_nombre: el nombre del firmante debe leerse bajo la rúbrica o en el pie de firma. Si la firma es ilegible y no existe nombre impreso, devuelva "ILEGIBLE". No utilice nombres que aparezcan en el membrete, en el destinatario o en el sello de recibido. La rúbrica manuscrita nunca es suficiente por sí sola para extraer un nombre.
+d) Coherencia temporal: si la fecha de emisión resulta ser posterior al año de contexto o anterior al año 2000, es muy probable que se trate de un error de lectura. Revise nuevamente la imagen antes de reportarla; si persiste la duda, aplique la contingencia correspondiente en vez de forzar una fecha dudosa.
+
 [3. REGLAS DE EXTRACCIÓN POR CAMPO]
-3.1. numero_oficio (cadena): transcriba el folio del emisor tal cual aparece (por ejemplo: "SSJ/DEA/2026/089", "HCG-CA-045-2026", "DSA-0123"), eliminando únicamente espacios al inicio y al final. No sustituya barras, guiones ni símbolos. Si el documento carece de folio, devuelva exactamente "S/N".
-3.2. fecha_emision (cadena, patrón YYYY-MM-DD): aplique el algoritmo de normalización de la sección 4.
+3.1. numero_oficio (cadena): transcriba el folio del emisor tal cual aparece (por ejemplo: "SSJ/DEA/2026/089", "HCG-CA-045-2026", "DSA-0123"), eliminando únicamente espacios al inicio y al final. No sustituya barras, guiones ni símbolos. Si el documento carece de folio, devuelva exactamente "S/N". Alerta: los números de control interno del sello de recibido NO son el número de oficio; confundirlos se considera un error grave (véase 2.9.a).
+3.2. fecha_emision (cadena, patrón YYYY-MM-DD): aplique el algoritmo de normalización de la sección 4. Alerta: la fecha del sello de recibido no debe usarse a menos que la fecha de emisión esté completamente ausente o ilegible (véase 2.9.b).
 3.3. procedencia ("HCG" o "Ajena"): aplique el árbol de decisión de la sección 5.
 3.4. dependencia_area (cadena): denominación de la unidad administrativa emisora tal como aparece en el membrete o pie de firma (por ejemplo "DIRECCIÓN DE ADMINISTRACIÓN", "SECRETARÍA DE SALUD JALISCO"), convertida a MAYÚSCULAS, sin abreviar mediante suposiciones.
-3.5. remitente_nombre (cadena): nombre completo del suscriptor que firma el documento, en MAYÚSCULAS. Si la firma resulta enteramente ilegible, transcriba la mejor lectura posible de la rúbrica; como última opción devuelva "ILEGIBLE".
+3.5. remitente_nombre (cadena): nombre completo del suscriptor que firma el documento, en MAYÚSCULAS. Si la firma resulta enteramente ilegible, transcriba la mejor lectura posible de la rúbrica; como última opción devuelva "ILEGIBLE". Alerta: no complete nombres parciales; si sólo se distingue un apellido y el resto es ilegible, devuelva "ILEGIBLE" en lugar de una conjetura (véase 2.9.c).
 3.6. remitente_cargo (cadena): cargo del suscriptor, en MAYÚSCULAS. Si no aparece, devuelva "NO ESPECIFICADO".
 3.7. destinatario_nombre (cadena): funcionario a quien se dirige el oficio, en MAYÚSCULAS.
 3.8. destinatario_cargo (cadena): cargo del destinatario, en MAYÚSCULAS. Si no aparece, devuelva "NO ESPECIFICADO".
@@ -132,11 +153,21 @@ class ExtractorMetadatos:
     # ------------------------------------------------------------------
     # API pública
     # ------------------------------------------------------------------
-    def extraer_de_paginas(self, paginas: list[PaginaRenderizada], *, anio_contexto: int) -> MetadatosOficio:
+    def extraer_de_paginas(
+        self,
+        paginas: list[PaginaRenderizada],
+        *,
+        anio_contexto: int,
+        textos_ocr: Optional[dict[int, str]] = None,
+    ) -> MetadatosOficio:
         """
         Ejecuta la inferencia multimodal sobre las páginas renderizadas.
 
         :param anio_contexto: año calendario vigente (expansión de años de 2 dígitos).
+        :param textos_ocr: referencia textual auxiliar opcional {núm. página: texto},
+            típicamente de `pdf_engine.extraer_texto_ocr`. Se adjunta al turno del
+            usuario como apoyo, nunca como fuente única de verdad (así lo indica
+            el propio texto incluido en el prompt del turno).
         :raises ErrorExtraccionIA: cuando el proveedor no está configurado o
             la respuesta viola el contrato (mapeado del enum original).
         """
@@ -163,7 +194,7 @@ class ExtractorMetadatos:
 
         # Orden de lectura natural (carátula primero).
         ordenadas = sorted(paginas, key=lambda p: p.numero)
-        contenido = self._construir_contenido(ordenadas, anio_contexto)
+        contenido = self._construir_contenido(ordenadas, anio_contexto, textos_ocr)
         config = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT_EXTRACCION_OFICIOS,
             temperature=0.0,
@@ -216,11 +247,17 @@ class ExtractorMetadatos:
     # ------------------------------------------------------------------
     # Internos
     # ------------------------------------------------------------------
-    def _construir_contenido(self, paginas: list[PaginaRenderizada], anio_contexto: int) -> list:
+    def _construir_contenido(
+        self,
+        paginas: list[PaginaRenderizada],
+        anio_contexto: int,
+        textos_ocr: Optional[dict[int, str]] = None,
+    ) -> list:
         """
-        Ensambla el turno multimodal del usuario: contexto textual → páginas
-        en orden → directiva de cierre (los hints viajan aquí, no en el
-        system prompt, para mantenerlo estático y cacheable).
+        Ensambla el turno multimodal del usuario: contexto textual → (opcional)
+        referencia OCR → páginas en orden → directiva de cierre (los hints
+        viajan aquí, no en el system prompt, para mantenerlo estático y
+        cacheable).
         """
         from google.genai import types
 
@@ -230,13 +267,20 @@ class ExtractorMetadatos:
             f"CONTEXTO TEMPORAL: el año calendario vigente del sistema es {anio_contexto}; "
             "úselo para expandir años de dos dígitos y completar fechas sin año visible.",
         ]
-        partes: list = [types.Part.from_text("\n".join(lineas))]
+        if textos_ocr:
+            lineas.append(
+                "TEXTO OCR AUXILIAR (referencia de apoyo, puede contener errores de "
+                "reconocimiento; las imágenes adjuntas son siempre la fuente de verdad):"
+            )
+            for numero_pagina in sorted(textos_ocr):
+                lineas.append(f"--- Página {numero_pagina} ---\n{textos_ocr[numero_pagina]}")
+        partes: list = [types.Part.from_text(text="\n".join(lineas))]
         partes += [
             types.Part.from_bytes(data=pagina.png, mime_type=pagina.mime) for pagina in paginas
         ]
         partes.append(
             types.Part.from_text(
-                "TAREA: aplique íntegramente el protocolo institucional y devuelva únicamente "
+                text="TAREA: aplique íntegramente el protocolo institucional y devuelva únicamente "
                 "el objeto JSON MetadatosOficio."
             )
         )
@@ -274,11 +318,40 @@ class ExtractorMetadatos:
     def _validar_contrato(self, datos: dict) -> MetadatosOficio:
         """Revalida y normaliza (mayúsculas, sanitización de folio, etc.)."""
         try:
-            return MetadatosOficio.model_validate(datos)
+            metadatos = MetadatosOficio.model_validate(datos)
         except Exception as exc:  # noqa: BLE001 — ValidationError de Pydantic
             raise ErrorExtraccionIA(
                 "SCHEMA_INVALIDO", f"El JSON viola el contrato MetadatosOficio: {exc}", exc
             ) from exc
+        self._revisar_heuristicas(metadatos)
+        return metadatos
+
+    @staticmethod
+    def _revisar_heuristicas(metadatos: MetadatosOficio) -> None:
+        """
+        Auditoría de calidad post-validación, siempre activa y determinista.
+        Deja constancia en el log de valores estructuralmente válidos pero
+        sospechosos de alucinación (folio muy corto, fecha fuera de rango
+        plausible, remitente muy corto) para trazabilidad de cara a la
+        revisión HITL. Deliberadamente de solo-lectura: NO corrige ni
+        sustituye valores — el reviewer debe ver exactamente lo que el
+        modelo devolvió, nunca una versión alterada en silencio.
+        """
+        numero = metadatos.numero_oficio
+        if numero != "S/N" and len(numero) < 3:
+            logger.warning("numero_oficio sospechosamente corto: %r", numero)
+
+        anio_emision = int(metadatos.fecha_emision[:4])
+        anio_actual = datetime.now().year
+        if anio_emision < 2000 or anio_emision > anio_actual + 1:
+            logger.warning(
+                "fecha_emision fuera de rango plausible (%s): posible error de lectura",
+                metadatos.fecha_emision,
+            )
+
+        nombre = metadatos.remitente_nombre
+        if nombre != "ILEGIBLE" and len(nombre) < 5:
+            logger.warning("remitente_nombre sospechosamente corto: %r", nombre)
 
     @staticmethod
     def _quitar_vallas_codigo(texto: str) -> str:

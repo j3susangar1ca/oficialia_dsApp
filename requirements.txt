@@ -5,8 +5,14 @@ nicegui>=2.7,<3            # Interfaz web (bandeja + HITL split-screen)
 pydantic>=2.7,<3           # Validación y tipado estricto (MetadatosOficio)
 pydantic-settings>=2.4,<3  # Configuración central (.env)
 pymupdf>=1.24              # Motor PDF: hash, sanitización y render (fitz)
+Pillow>=10.0,<13           # Realce de imagen (autocontraste/nitidez) antes de la IA
 watchdog>=4.0              # Vigilancia de storage/01_entrada/
 google-genai>=1.0,<2       # SDK oficial de Gemini 2.5 Flash
 playwright>=1.45,<2        # RPA de la Intranet Webix (op_cucs.fwx)
 gspread>=6.0,<7            # Google Sheets (Service Account)
 google-auth>=2.30          # Credenciales de la Service Account
+
+# Opcional — referencia OCR auxiliar (core/pdf_engine.py: extraer_texto_ocr).
+# Sin esta dependencia y el binario `tesseract-ocr` instalado en el sistema,
+# el pipeline continúa normalmente sin texto OCR auxiliar (degradación segura).
+# pytesseract>=0.3,<1
