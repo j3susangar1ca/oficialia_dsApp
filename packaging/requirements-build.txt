@@ -1,0 +1,4 @@
+# Dependencias EXTRA para compilar el instalador de Windows (no las necesita
+# el usuario final que solo ejecuta el .exe ya instalado).
+# Uso: pip install -r requirements.txt -r packaging/requirements-build.txt
+pyinstaller>=6.10,<7
