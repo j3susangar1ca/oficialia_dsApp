@@ -88,6 +88,14 @@ class Configuracion(BaseSettings):
     rpa_hcg_dependencia_cve: str = ""   # CVE de dependencia cuando procedencia = HCG
     rpa_seccion_cve: str = ""           # CVE de sección (campo opcional 'seccion')
 
+    # -- Tolerancia a demoras de red / reintentos / sesión (worker Playwright) --
+    rpa_selector_timeout_ms: int = 15_000   # Timeout individual por selector/control Webix
+    rpa_webix_init_timeout_ms: int = 20_000 # Timeout de carga del framework Webix en el iframe
+    rpa_reintento_base_ms: int = 1_000      # Base del backoff exponencial entre intentos
+    rpa_reintento_max_ms: int = 30_000      # Techo del backoff exponencial
+    rpa_session_ttl_min: int = 30           # Minutos de vida útil del storage_state persistido
+    rpa_jitter_factor: float = 0.25         # Amplitud del jitter del backoff (±25% por defecto)
+
     # ------------------------------------------------------------------
     # Sincronización externa — Google Sheets (cuenta de servicio)
     # ------------------------------------------------------------------
@@ -104,6 +112,13 @@ class Configuracion(BaseSettings):
         valor = valor.strip().lower()
         if valor not in {"simulacion", "playwright"}:
             raise ValueError("RPA_MODO debe ser 'simulacion' o 'playwright'")
+        return valor
+
+    @field_validator("rpa_jitter_factor")
+    @classmethod
+    def _validar_jitter(cls, valor: float) -> float:
+        if not 0.0 <= valor <= 1.0:
+            raise ValueError("RPA_JITTER_FACTOR debe estar entre 0.0 y 1.0")
         return valor
 
     # ------------------------------------------------------------------
@@ -151,6 +166,11 @@ class Configuracion(BaseSettings):
             lineas.append("                 ⚠ modo seguro para pruebas locales — configure RPA_MODO=playwright para producción")
         if not self.rpa_headless and not self.rpa_es_simulacion:
             lineas.append("                 (navegador VISIBLE: RPA_HEADLESS=false)")
+        if not self.rpa_es_simulacion:
+            lineas.append(
+                f"                 sesión persistida hasta {self.rpa_session_ttl_min} min "
+                f"en {self.storage_root / '.rpa_sessions'}"
+            )
         lineas.append(
             f"Google Sheets  : {'Service Account activa' if self.sheets_configurado else 'STUB LOCAL (CSV espejo en data/) — sin credenciales'}"
         )
