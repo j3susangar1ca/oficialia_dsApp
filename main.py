@@ -167,4 +167,9 @@ ui.run(
     show=False,
     favicon="🏥",
     dark=False,
+    # Localiza los textos incorporados de Quasar (paginación de ui.table,
+    # selectores de fecha, diálogos…) al español — antes el paginador de la
+    # bandeja mostraba "Records per page:" / "1-3 of 3" pese a que el resto
+    # de la interfaz está en español.
+    language="es",
 )
