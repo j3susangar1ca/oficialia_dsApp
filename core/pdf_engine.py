@@ -189,6 +189,30 @@ def renderizar_paginas(
         doc.close()
 
 
+def extraer_texto_capa(buffer: bytes, *, max_paginas: int = 10) -> dict[int, str]:
+    """
+    Extrae la capa de texto EMBEBIDA del PDF (sin OCR, sin dependencias
+    adicionales): instantáneo y gratis para documentos "nacidos digitales"
+    (ej. un oficio exportado desde Word), pero vacío para PDFs de solo
+    imagen (fax, escaneo del ADF sin capa de texto) — en ese caso el
+    llamador debe recurrir a `extraer_texto_ocr` si necesita texto igual.
+    Nunca lanza: una página cuya extracción falle se omite del resultado.
+    """
+    doc = _abrir_pdf(buffer)
+    try:
+        textos: dict[int, str] = {}
+        for indice in range(min(doc.page_count, max_paginas)):
+            try:
+                texto = doc.load_page(indice).get_text().strip()
+                if texto:
+                    textos[indice + 1] = texto
+            except Exception as exc:  # noqa: BLE001 — página corrupta puntual
+                logger.warning("Extracción de texto embebido omitida en página %d: %s", indice + 1, exc)
+        return textos
+    finally:
+        doc.close()
+
+
 def extraer_texto_ocr(
     buffer: bytes, *, dpi: int = 200, max_paginas: int = 10, idioma: str = "spa"
 ) -> dict[int, str]:

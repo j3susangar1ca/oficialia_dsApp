@@ -1,0 +1,6 @@
+# Dependencias EXTRA para desarrollo/pruebas (no las necesita el usuario
+# final ni el instalador de Windows — ver packaging/requirements-build.txt
+# para lo que sí se embebe en el .exe).
+# Uso: pip install -r requirements.txt -r requirements-dev.txt
+#      pytest -q
+pytest>=8.0,<9

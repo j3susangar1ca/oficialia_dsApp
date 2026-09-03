@@ -1,3 +1,97 @@
+# Oficialía Digital DSA — 100% Python
+
+> **Middleware de Ingesta, Extracción IA y RPA para Gestión Documental**
+> Reconstrucción unificada del sistema original (Node.js/Fastify/TypeScript/Svelte 5/WebSockets)
+> en **Python puro**, sin sobreingeniería: un proceso, un comando (`python main.py`), cero Node.
+
+**Institución:** División de Servicios Administrativos (DSA) — Hospital Civil de Guadalajara (HCG).
+
+---
+
+## 1. Qué hace el sistema
+
+1. **Ingesta dual de PDFs**: vigilancia automática de `storage/01_entrada/` (escáner ADF, vía
+   `watchdog`) y carga manual por la web (arrastrar y soltar). Deduplicación **atómica** por
+   SHA-256: un duplicado jamás crea un segundo registro.
+2. **Preprocesamiento** con **PyMuPDF** en memoria: validación de cabecera/contraseña/estructura,
+   sanitización del árbol xref, conteo de páginas y renderizado a **PNG @300 dpi** (máx. 10
+   páginas por inferencia).
+3. **Extracción estructurada** con **Gemini 2.5 Flash** (SDK oficial `google-genai`):
+   system prompt institucional (protocolo OCR de oficios, 9 secciones), salida JSON forzada y
+   validación estricta con **Pydantic v2** (`MetadatosOficio`, 11 campos). Si la IA no está
+   disponible (sin API key, cuota agotada, timeout de red), un **extractor heurístico de
+   respaldo** (`core/heuristic_extractor.py`, solo regex, sin red) rescata al menos el número
+   de oficio y la fecha del texto plano del PDF, para que el documento llegue de todos modos a
+   `PENDIENTE_REVISION` — marcado como `HEURISTICA_FALLBACK` — en vez de perderse en cuarentena.
+4. **Ciclo de vida persistido en SQLite (WAL)**:
+   `INGESTADO → EN_PREPROCESO → EXTRAYENDO → PENDIENTE_REVISION → EJECUTANDO_RPA → COMPLETADO`
+   (con `ERROR_RPA` reinteligible y `DESCARTADO` terminal).
+5. **Revisión asistida (HITL)** en la web: bandeja con filtros/KPIs/buscador en vivo y
+   **split-screen 50/50** — visor de PDF a la izquierda, formulario precargado con la IA a la
+   derecha. Acciones: **[Confirmar y Registrar]**, **[Descartar]**, **[Reintentar RPA]**.
+6. **Al confirmar**: renombrado canónico `YYYY-MM-DD__[FOLIO]__[REMITENTE].pdf` en
+   `storage/03_procesados/YYYY/MM/` + **respaldo espejo `.json`** + verificación de hash
+   post-escritura.
+7. **RPA con Playwright**: inyección del oficio en la Intranet Webix (`op_cucs.fwx` → iframe
+   `op_ningr.fwx`), subida del PDF canónico, captura del **folio de acuse** y screenshot de
+   evidencia. Modo dual `RPA_MODO=simulacion|playwright` y `RPA_HEADLESS=false` para ver el
+   navegador.
+8. **Sincronización opcional a Google Sheets** (cuenta de servicio) con el layout A:M del tablero
+   de control; sin credenciales funciona en **stub local** (`data/tablero_local.csv`).
+9. **Operación diagnosticable**: log rotativo a archivo (`logs/app.log`, 10 MB × 5 respaldos,
+   `core/logging_setup.py`) además de la consola, y esquema SQLite versionado
+   (`PRAGMA user_version` + migraciones incrementales en `database.py`) para que actualizar la
+   app sobre una instalación existente no corrompa ni pierda la base de datos de un cliente.
+
+---
+
+## 2. Instalación en Windows (usuario final — sin Python, sin nada que instalar a mano)
+
+Para el personal de la DSA que solo va a **usar** el sistema en un equipo Windows 10/11,
+no hace falta clonar el repositorio, instalar Python ni ejecutar `pip install`:
+
+1. Vaya a la pestaña **[Releases](../../releases)** de este repositorio (o a la pestaña
+   **Actions → Instalador de Windows → última ejecución → Artifacts**, si aún no hay una
+   versión etiquetada) y descargue **`OficialiaDigitalDSA-Setup.exe`**.
+2. Ejecútelo y siga el asistente (pide permisos de administrador **solo durante la
+   instalación**, para escribir en `Archivos de programa` y crear la carpeta de datos
+   compartida). Puede omitir el componente **"Automatización RPA"** (~300 MB, el
+   navegador Chromium) si de momento solo va a usar el modo simulación/HITL.
+3. Al terminar, el propio instalador ofrece abrir la aplicación — el navegador se abre
+   solo en `http://127.0.0.1:8080`. También queda un acceso directo en el Escritorio y
+   en el menú Inicio.
+4. Para extracción real con Gemini (o RPA/Sheets reales), abra
+   **Inicio → Oficialía Digital DSA → Configuración (.env)**, capture las claves/credenciales
+   necesarias y reinicie la aplicación. **Esto es lo único que el instalador no puede
+   resolver por usted**: la API key de Gemini y las credenciales institucionales son
+   secretos propios de cada instalación, no dependencias de software.
+5. Sin tocar nada, el sistema arranca igualmente en modo seguro: RPA simulado
+   (acuses sintéticos `HCG-OP-SIM-*`) y Google Sheets en stub local — sirve para
+   explorar la bandeja y el flujo HITL antes de configurar credenciales reales.
+
+Todo queda instalado en `Archivos de programa\OficialiaDigitalDSA\` (código, de solo
+lectura) y los datos (`oficialia.db`, PDFs procesados, `.env`) en
+`%ProgramData%\OficialiaDigitalDSA\` (con permisos de escritura para el usuario estándar
+que ejecuta la app — no requiere privilegios de administrador en el uso diario).
+Desinstalar desde *Agregar o quitar programas* **no borra** esa carpeta de datos: la BD y
+los PDFs institucionales quedan a salvo.
+
+> **¿Cómo se genera ese instalador?** `packaging/oficialia.spec` (PyInstaller) +
+> `packaging/oficialia.iss` (Inno Setup) + `packaging/build_windows.ps1` los ensamblan en
+> un único `.exe` que ya trae Python, todas las dependencias de `requirements.txt` y
+> (opcionalmente) el navegador Chromium de Playwright — el usuario final nunca instala
+> nada de eso por separado. El workflow `.github/workflows/build-windows-installer.yml`
+> construye este instalador automáticamente en un runner de Windows de GitHub Actions
+> (PyInstaller no compila de forma cruzada) cada vez que se publica un tag `v*`, y lo deja
+> tanto como artefacto de la ejecución como adjunto de la Release — nadie necesita un
+> equipo Windows propio para publicar una nueva versión. Vea el detalle en
+> `packaging/build_windows.ps1`. **No se incluye Tesseract/OCR** (dependencia opcional y
+> auxiliar de `core/pdf_engine.py`: el sistema funciona igual sin ella, la extracción
+> corre por Gemini) — si el IT institucional lo requiere, puede instalarse aparte.
+
+---
+
+## 3. Arquitectura (monolito modular, un solo proceso)
 # Oficialía Digital DSA
 
 > Aplicación monolítica en Python para recibir oficios PDF, extraer metadatos con Gemini, revisarlos por una persona y registrarlos mediante RPA.
@@ -144,6 +238,24 @@ curl -o acuse.png http://localhost:8080/evidencia/<doc_id>
 
 La distribución para Windows se construye **en Windows**; PyInstaller no realiza compilación cruzada. El script crea un entorno de construcción, instala requisitos y PyInstaller, descarga Chromium, genera el bundle y compila el instalador con Inno Setup.
 
+### 5.6 Ejecutar la suite de pruebas
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+No requiere `GEMINI_API_KEY`, Playwright ni Tesseract: cada prueba usa su propia
+carpeta temporal (BD SQLite + storage aislados, `tests/conftest.py`) y dobles
+(fakes) explícitos donde haría falta un servicio externo — nunca golpea Gemini,
+la Intranet real ni internet. Cobertura actual: contrato `MetadatosOficio`
+(normalización, centinela `S/N`, nomenclatura canónica), repositorio SQLite
+(CRUD, concurrencia optimista, **migraciones de esquema**, el buscador de la
+bandeja), preprocesamiento PyMuPDF, el extractor heurístico de respaldo
+(sección 1) y la integración completa del pipeline de ingesta con un extractor
+de IA simulado. `pytest.ini` fija `testpaths = tests`.
+
+---
 ```powershell
 .\packaging\build_windows.ps1
 ```
