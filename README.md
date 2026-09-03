@@ -1,10 +1,20 @@
-# Oficialía Digital DSA — 100% Python
+<div align="center">
+  <img src="https://img.icons8.com/color/96/python--v1.png" width="76" alt="Python" />
+  <h1>Oficialía Digital DSA</h1>
+  <p><strong>Recepción, extracción, revisión y registro trazable de oficios PDF.</strong></p>
+  <p>
+    <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+" />
+    <img src="https://img.shields.io/badge/NiceGUI-UI-4F46E5?style=for-the-badge" alt="NiceGUI" />
+    <img src="https://img.shields.io/badge/SQLite-WAL-003B57?style=for-the-badge&logo=sqlite&logoColor=white" alt="SQLite WAL" />
+    <img src="https://img.shields.io/badge/Gemini-Structured_Extraction-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="Gemini" />
+    <img src="https://img.shields.io/badge/Playwright-RPA-2EAD33?style=for-the-badge&logo=playwright&logoColor=white" alt="Playwright" />
+  </p>
+</div>
 
-> **Middleware de Ingesta, Extracción IA y RPA para Gestión Documental**
-> Reconstrucción unificada del sistema original (Node.js/Fastify/TypeScript/Svelte 5/WebSockets)
-> en **Python puro**, sin sobreingeniería: un proceso, un comando (`python main.py`), cero Node.
+> [!IMPORTANT]
+> **Uso interno.** Plataforma para la División de Servicios Administrativos (DSA) del Hospital Civil de Guadalajara. Proteja los PDFs, evidencias y credenciales conforme a la política institucional.
 
-**Institución:** División de Servicios Administrativos (DSA) — Hospital Civil de Guadalajara (HCG).
+## Índice
 
 ---
 
@@ -56,157 +66,187 @@
 
 ---
 
-## 2. Instalación en Windows (usuario final — sin Python, sin nada que instalar a mano)
+## Propósito
 
-Para el personal de la DSA que solo va a **usar** el sistema en un equipo Windows 10/11,
-no hace falta clonar el repositorio, instalar Python ni ejecutar `pip install`:
+**Oficialía Digital DSA** es un monolito web local de un solo proceso. Recibe oficios por una carpeta vigilada o la interfaz web, los valida y extrae, pide validación humana (**HITL**), registra los aprobados por RPA y publica un tablero opcional.
 
-1. Vaya a la pestaña **[Releases](../../releases)** de este repositorio (o a la pestaña
-   **Actions → Instalador de Windows → última ejecución → Artifacts**, si aún no hay una
-   versión etiquetada) y descargue **`OficialiaDigitalDSA-Setup.exe`**.
-2. Ejecútelo y siga el asistente (pide permisos de administrador **solo durante la
-   instalación**, para escribir en `Archivos de programa` y crear la carpeta de datos
-   compartida). El componente **"Automatización RPA"** (~300 MB, el navegador Chromium)
-   es opcional y puede omitirse en la mayoría de los casos: por defecto
-   (`RPA_NAVEGADOR=auto`) el RPA real usa primero el Microsoft Edge que Windows 10/11 ya
-   trae instalado de fábrica, sin descargar nada — el Chromium empaquetado solo entra como
-   respaldo si Edge no está disponible en ese equipo.
-3. Al terminar, el propio instalador ofrece abrir la aplicación — el navegador se abre
-   solo en `http://127.0.0.1:8080`. También queda un acceso directo en el Escritorio y
-   en el menú Inicio.
-4. Para extracción real con Gemini (o RPA/Sheets reales), abra
-   **Inicio → Oficialía Digital DSA → Configuración (.env)**, capture las claves/credenciales
-   necesarias y reinicie la aplicación. **Esto es lo único que el instalador no puede
-   resolver por usted**: la API key de Gemini y las credenciales institucionales son
-   secretos propios de cada instalación, no dependencias de software.
-5. Sin tocar nada, el sistema arranca igualmente en modo seguro: RPA simulado
-   (acuses sintéticos `HCG-OP-SIM-*`) y Google Sheets en stub local — sirve para
-   explorar la bandeja y el flujo HITL antes de configurar credenciales reales.
+| Capacidad | Diseño | Resultado |
+|---|---|---|
+| 📥 Ingesta | `watchdog` + carga NiceGUI | Escáner ADF o navegador; deduplicación por SHA-256. |
+| 🧾 PDF | PyMuPDF + Pillow | Validación, sanitización, render limitado y OCR auxiliar opcional. |
+| 🧠 Extracción | Gemini + Pydantic v2 | Contrato de 11 campos; fallback heurístico sobre texto/OCR. |
+| 👤 HITL | Bandeja + visor 50/50 | Corrección, confirmación individual/lote y descarte auditable. |
+| 🤖 RPA | Playwright o simulación | Registro en Webix, folio de acuse y captura de evidencia. |
+| 📊 Tablero | Google Sheets o CSV | La tabulación no bloquea ni revierte un documento completado. |
 
-Todo queda instalado en `Archivos de programa\OficialiaDigitalDSA\` (código, de solo
-lectura) y los datos (`oficialia.db`, PDFs procesados, `.env`) en
-`%ProgramData%\OficialiaDigitalDSA\` (con permisos de escritura para el usuario estándar
-que ejecuta la app — no requiere privilegios de administrador en el uso diario).
-Desinstalar desde *Agregar o quitar programas* **no borra** esa carpeta de datos: la BD y
-los PDFs institucionales quedan a salvo.
+## Arquitectura
 
-> **¿Cómo se genera ese instalador?** `packaging/oficialia.spec` (PyInstaller) +
-> `packaging/oficialia.iss` (Inno Setup) + `packaging/build_windows.ps1` los ensamblan en
-> un único `.exe` que ya trae Python, todas las dependencias de `requirements.txt` y
-> (opcionalmente) el navegador Chromium de Playwright — el usuario final nunca instala
-> nada de eso por separado. El workflow `.github/workflows/build-windows-installer.yml`
-> construye este instalador automáticamente en un runner de Windows de GitHub Actions
-> (PyInstaller no compila de forma cruzada) cada vez que se publica un tag `v*`, y lo deja
-> tanto como artefacto de la ejecución como adjunto de la Release — nadie necesita un
-> equipo Windows propio para publicar una nueva versión. Vea el detalle en
-> `packaging/build_windows.ps1`. **No se incluye Tesseract/OCR** (dependencia opcional y
-> auxiliar de `core/pdf_engine.py`: el sistema funciona igual sin ella, la extracción
-> corre por Gemini) — si el IT institucional lo requiere, puede instalarse aparte.
+### Contexto y contenedores
 
----
+```mermaid
+C4Context
+    title Contexto — Oficialía Digital DSA
+    Person(revisor, "Personal DSA", "Carga, revisa, aprueba y reintenta")
+    Person(scanner, "Escáner ADF", "Deposita PDFs")
+    System_Boundary(app, "Oficialía Digital DSA · Python") {
+        Container(ui, "UI local", "NiceGUI / FastAPI", "Bandeja, HITL, visor y evidencias")
+        Container(pipeline, "Flujo documental", "Python", "Ingesta, extracción, HITL y salida")
+        ContainerDb(db, "Repositorio", "SQLite WAL", "Estados, metadatos y auditoría")
+        Container(storage, "Storage", "Filesystem", "Entrada, proceso, archivo y cuarentena")
+        Container(watcher, "Vigilante", "watchdog + sondeo", "Detecta PDFs estables")
+    }
+    System_Ext(gemini, "Google Gemini", "Extracción multimodal")
+    System_Ext(intranet, "Intranet HCG", "Formulario Webix")
+    System_Ext(sheets, "Google Sheets", "Tablero opcional")
+    Rel(revisor, ui, "Opera", "HTTP local")
+    Rel(scanner, storage, "Deposita")
+    Rel(watcher, storage, "Observa")
+    Rel(watcher, pipeline, "Programa ingesta")
+    Rel(ui, pipeline, "Carga / confirma / descarta")
+    Rel(pipeline, db, "Lee y escribe", "SQL")
+    Rel(pipeline, storage, "Mueve y transforma")
+    Rel(pipeline, gemini, "Extrae", "HTTPS")
+    Rel(pipeline, intranet, "Registra", "Playwright")
+    Rel(pipeline, sheets, "Publica", "HTTPS")
+```
 
-## 3. Arquitectura (monolito modular, un solo proceso)
-# Oficialía Digital DSA
-
-> Aplicación monolítica en Python para recibir oficios PDF, extraer metadatos con Gemini, revisarlos por una persona y registrarlos mediante RPA.
-
-![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue?style=flat-square)
-![UI NiceGUI](https://img.shields.io/badge/UI-NiceGUI-gray?style=flat-square)
-![Database SQLite](https://img.shields.io/badge/Database-SQLite-green?style=flat-square)
-![License Internal](https://img.shields.io/badge/License-Uso%20interno-critical?style=flat-square)
-
-## Alcance y arquetipo
-
-**Oficialía Digital DSA** es una aplicación web de gestión documental de proceso único. Expone una interfaz NiceGUI y dos rutas HTTP para servir documentos; no ofrece una API pública de integración. Su punto de entrada es [`main.py`](main.py), ejecutado con `python main.py`.
-
-El sistema recibe PDF desde la carga web o desde una carpeta vigilada, valida y renderiza el archivo, solicita metadatos estructurados a Gemini, exige su validación *human-in-the-loop* (HITL), y finalmente registra el oficio mediante RPA o un simulador. SQLite conserva el estado y Google Sheets recibe una réplica no bloqueante cuando el registro RPA tiene éxito.
-
-| Área | Implementación |
-| --- | --- |
-| Runtime | Python 3.11+ |
-| Interfaz y servidor | NiceGUI, FastAPI/Starlette y Uvicorn (dependencias transitivas de NiceGUI) |
-| Validación y configuración | Pydantic 2 y pydantic-settings |
-| Persistencia | SQLite con WAL |
-| Procesamiento PDF | PyMuPDF y Pillow; OCR auxiliar opcional con Tesseract/pytesseract |
-| IA | `google-genai`, modelo configurable (por defecto `gemini-2.5-flash`) |
-| Automatización | Playwright contra la Intranet Webix, con modo simulación |
-| Tablero externo | Google Sheets mediante gspread y una cuenta de servicio |
-| Empaquetado Windows | PyInstaller e Inno Setup |
-
-## Arquitectura y flujo operativo
+### Componentes, aislamiento y concurrencia
 
 ```mermaid
 flowchart LR
-    Scanner[Escáner / carpeta vigilada] --> Watcher[Vigilante watchdog]
-    Upload[Carga web] --> UI[Interfaz NiceGUI]
-    Watcher --> Pipeline[FlujoDocumental]
-    UI --> Pipeline
-    Pipeline --> Files[Storage de PDFs]
-    Pipeline --> DB[(SQLite WAL)]
-    Pipeline --> PDF[PyMuPDF: validar, sanitizar y renderizar]
-    PDF --> AI[Gemini: extracción estructurada]
-    AI --> HITL[Revisión HITL]
-    HITL -->|Confirmar| Canonico[PDF canónico y JSON espejo]
-    Canonico --> RPA[RPA Playwright o simulación]
-    RPA --> Intranet[Intranet Webix]
-    RPA --> Sheets[Google Sheets o CSV local]
-    HITL -->|Descartar| Error[Cuarentena]
-    Pipeline -->|Fallo de PDF o IA| Error
+  subgraph Process[Proceso Python · main.py]
+    UI[NiceGUI + FastAPI\nBandeja / HITL]
+    W[Vigilante\nevento + sondeo]
+    I[Executor de ingesta]
+    P[FlujoDocumental]
+    O[Executor de salida\nRPA serializado]
+    R[RepositorioDocumentos]
+    F[GestorArchivos]
+    A[ExtractorMetadatos]
+    X[Adaptador RPA\nsimulación | Playwright]
+    Y[SincronizadorSheets]
+  end
+  PDF[(Storage)] --> W --> I --> P
+  UI --> P
+  P <--> F <--> PDF
+  P <--> R <--> DB[(SQLite WAL)]
+  P --> A --> G[Gemini]
+  P --> O --> X --> N[Intranet Webix]
+  O --> Y --> T[Sheets / CSV]
 ```
 
-El flujo persiste los documentos y sus metadatos relacionados en una única tabla `documentos`. Las conexiones a SQLite son cortas y configuran WAL, `busy_timeout` y control de concurrencia optimista por versión. El SHA-256 del archivo tiene una restricción única para impedir duplicados entre los canales web y escáner.
+Cada operación de base de datos usa una conexión SQLite corta. WAL, `busy_timeout`, hash único y concurrencia optimista por `version` resguardan las actualizaciones entre hilos. La salida serializa RPA para no competir por sesión/navegador.
 
-### Ciclo de vida
+### Despliegue
+
+```mermaid
+flowchart TB
+  subgraph Equipo[Equipo Windows 10/11]
+    B[Navegador] --> App[OficialiaDigitalDSA.exe\no python main.py]
+    App --> Data[%ProgramData%/OficialiaDigitalDSA\n.env · data · storage · logs]
+    App --> Edge[Edge o Chromium Playwright]
+  end
+  App -. Gemini configurado .-> Gemini[Google Gemini]
+  Edge -. RPA_MODO=playwright .-> Webix[Intranet]
+  App -. Sheets configurado .-> Sheets[Google Sheets]
+```
+
+En desarrollo los datos viven en la raíz del repositorio. El ejecutable PyInstaller usa `%ProgramData%\OficialiaDigitalDSA` y reserva `%LOCALAPPDATA%` si la primera ruta no es escribible.
+
+## Ciclo de vida
 
 ```mermaid
 stateDiagram-v2
-    [*] --> INGESTADO
-    INGESTADO --> EN_PREPROCESO
-    EN_PREPROCESO --> EXTRAYENDO
-    EXTRAYENDO --> PENDIENTE_REVISION
-    EN_PREPROCESO --> DESCARTADO: error PDF
-    EXTRAYENDO --> DESCARTADO: error de IA
-    PENDIENTE_REVISION --> EJECUTANDO_RPA: confirmar HITL
-    PENDIENTE_REVISION --> DESCARTADO: descartar HITL
-    EJECUTANDO_RPA --> COMPLETADO: RPA exitoso
-    EJECUTANDO_RPA --> ERROR_RPA: RPA fallido
-    ERROR_RPA --> EJECUTANDO_RPA: reintentar
-    COMPLETADO --> [*]
-    DESCARTADO --> [*]
+  [*] --> INGESTADO: Watchfolder o carga web
+  INGESTADO --> EN_PREPROCESO
+  EN_PREPROCESO --> EXTRAYENDO: PDF válido
+  EN_PREPROCESO --> DESCARTADO: PDF inválido / fallo
+  EXTRAYENDO --> PENDIENTE_REVISION: IA o heurística
+  EXTRAYENDO --> DESCARTADO: extracción no recuperable
+  PENDIENTE_REVISION --> EJECUTANDO_RPA: confirmar HITL
+  PENDIENTE_REVISION --> DESCARTADO: descarte con motivo
+  EJECUTANDO_RPA --> COMPLETADO: acuse exitoso
+  EJECUTANDO_RPA --> ERROR_RPA: RPA fallido
+  ERROR_RPA --> EJECUTANDO_RPA: reintentar RPA
+  COMPLETADO --> [*]
+  DESCARTADO --> [*]
 ```
 
-Los archivos recorren `storage/01_entrada`, `storage/02_en_proceso`, `storage/03_procesados` y `storage/04_errores`. La confirmación HITL mueve el PDF a la ubicación canónica y genera su JSON espejo; los errores se aíslan con un archivo `.error.txt` asociado.
+```mermaid
+sequenceDiagram
+  autonumber
+  participant E as Escáner / Web
+  participant P as Flujo
+  participant S as Storage
+  participant D as SQLite
+  participant G as Gemini / heurística
+  participant H as Revisor HITL
+  participant R as RPA
+  participant T as Tablero
+  E->>P: PDF + origen
+  P->>S: 01_entrada + SHA-256
+  P->>D: INGESTADO (hash único)
+  P->>S: 02_en_proceso; sanitiza y renderiza
+  P->>G: Extrae metadatos tipados
+  G-->>P: IA o fallback
+  P->>D: PENDIENTE_REVISION
+  H->>P: Corrige y confirma
+  P->>S: PDF canónico + JSON en 03_procesados
+  P->>D: Auditoría + EJECUTANDO_RPA
+  P->>R: Salida en segundo plano
+  alt Éxito
+    R-->>P: Folio + PNG
+    P->>D: COMPLETADO
+    P->>T: Sheets o CSV
+  else Fallo
+    R-->>P: Error
+    P->>D: ERROR_RPA
+  end
+```
 
-## Inicio rápido desde código fuente
+| Directorio | Uso | Artefactos |
+|---|---|---|
+| `storage/01_entrada/` | Aterrizaje | PDF original temporal. |
+| `storage/02_en_proceso/` | Exclusión de proceso | `<uuid>.pdf`. |
+| `storage/03_procesados/YYYY/MM/` | Archivo aprobado | PDF canónico, JSON espejo y evidencias. |
+| `storage/04_errores/` | Cuarentena | PDF y `<archivo>.error.txt` sellado. |
 
-### Prerrequisitos
+### Controles de fiabilidad
 
-- Python **3.11 o superior** con `venv` y `pip`.
-- Una clave de Gemini para completar la extracción real: `[CONFIGURAR_GEMINI_API_KEY]`.
-- Solo para `RPA_MODO=playwright`: acceso a la Intranet, credenciales si aplican y Chromium de Playwright.
-- Solo para Google Sheets: ID de hoja y credenciales de cuenta de servicio.
+| Riesgo | Control |
+|---|---|
+| Doble ingreso | SHA-256 + `UNIQUE`; el duplicado se aísla. |
+| IA no disponible | Reintentos y luego heurística, excepto bloqueos de seguridad. |
+| Datos heurísticos | La interfaz los identifica; nunca entran en confirmación por lote. |
+| Fallo RPA | `ERROR_RPA` conserva contexto y permite reintento sin reextraer. |
+| Fallo Sheets | No revierte `COMPLETADO`; se persiste el resultado o se usa CSV local. |
+| Trazabilidad | Auditoría HITL, JSON espejo, cuarentena y evidencias. |
 
-### Instalación y ejecución
+> [!WARNING]
+> No hay autenticación propia de aplicación. Ejecute en una estación/red controlada y mantenga `.env`, SQLite, PDFs y capturas fuera de repositorios públicos. Use `RPA_MODO=simulacion` hasta homologar el formulario institucional.
+
+## Inicio rápido
+
+**Requisitos:** Python 3.11+, `pip`, y una clave Gemini solo si se desea extracción IA. Chromium/Edge es necesario únicamente para RPA real.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
-# En Windows PowerShell: .venv\Scripts\Activate.ps1
-
+source .venv/bin/activate                 # Linux/macOS
+# .venv\Scripts\Activate.ps1              # Windows PowerShell
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-cp .env.example .env
+touch .env                                 # En Windows, cree .env manualmente
 python main.py
 ```
 
-Abra `http://localhost:8080` si conserva el valor predeterminado de `APP_PORT`. La aplicación crea las carpetas de almacenamiento y la base de datos al iniciar.
+Abra `http://localhost:8080`. Sin configuración externa, el modo predeterminado es RPA simulado y tablero CSV local.
 
-Para usar automatización real, instale el navegador administrado por Playwright después de instalar las dependencias:
-
-```bash
-playwright install chromium
+```dotenv
+# .env mínimo
+GEMINI_API_KEY=pegue_su_clave
+RPA_MODO=simulacion
+WATCHFOLDER_ENABLED=true
 ```
-
-En desarrollo, los datos se almacenan bajo la raíz del repositorio. En el ejecutable Windows empaquetado, se usan `%ProgramData%\OficialiaDigitalDSA` o, como reserva, `%LOCALAPPDATA%\OficialiaDigitalDSA`.
 
 ## Configuración
 
@@ -249,37 +289,35 @@ Las rutas HTTP están destinadas al visor interno de NiceGUI:
 Ejemplos de consulta local, usando un identificador existente:
 
 ```bash
-curl -OJ http://localhost:8080/pdf/<doc_id>
-curl -o acuse.png http://localhost:8080/evidencia/<doc_id>
+python -m playwright install chromium
 ```
 
-## Construcción del instalador Windows
+Durante homologación, use navegador visible y valide el acuse antes de automatizar sin supervisión.
 
-La distribución para Windows se construye **en Windows**; PyInstaller no realiza compilación cruzada. El script crea un entorno de construcción, instala requisitos y PyInstaller, descarga Chromium, genera el bundle y compila el instalador con Inno Setup.
+## Operación
 
-### 5.6 Ejecutar la suite de pruebas
+1. Inicie la app y compruebe en `logs/app.log` la carpeta de datos y modos activos.
+2. Deposite PDFs en `01_entrada` o cárguelos desde la bandeja.
+3. Revise **Pendientes**; toda extracción heurística exige verificación manual.
+4. Confirme para archivar PDF/JSON y encolar RPA; los lotes aceptan solo extracción IA.
+5. Atienda **Errores RPA** con URL, credenciales, CVE o selectores corregidos y reintente.
+6. Respalde `data/`, `storage/` y `logs/` según la política institucional.
+
+| Síntoma | Acción |
+|---|---|
+| IA descarta | Revise clave, conectividad y log; sin texto extraíble el fallback puede no ser suficiente. |
+| Watchfolder inactivo | Confirme permisos, `WATCHFOLDER_ENABLED=true` y estabilidad del archivo. |
+| `ERROR_RPA` | Valide URL/credenciales/CVE y cambios Webix con `RPA_HEADLESS=false`. |
+| Sin Google Sheets | Revise permisos y Service Account; sin configuración el CSV local es el resultado esperado. |
+
+## Pruebas y empaquetado
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements.txt -r requirements-dev.txt
 pytest -q
 ```
 
-No requiere `GEMINI_API_KEY`, Playwright ni Tesseract: cada prueba usa su propia
-carpeta temporal (BD SQLite + storage aislados, `tests/conftest.py`) y dobles
-(fakes) explícitos donde haría falta un servicio externo — nunca golpea Gemini,
-la Intranet real ni internet. Cobertura actual: contrato `MetadatosOficio`
-(normalización, centinela `S/N`, nomenclatura canónica), repositorio SQLite
-(CRUD, concurrencia optimista, **migraciones de esquema**, el buscador de la
-bandeja), preprocesamiento PyMuPDF, el extractor heurístico de respaldo
-(sección 1) y la integración completa del pipeline de ingesta con un extractor
-de IA simulado. `pytest.ini` fija `testpaths = tests`.
-
----
-```powershell
-.\packaging\build_windows.ps1
-```
-
-## 6. Modos de operación
+La suite cubre configuración, modelos, SQLite/migraciones, PDF, heurística y pipeline simulado; no llama a Gemini ni a la Intranet.
 
 | Módulo | Variable | Valores | Sin configurar |
 | --- | --- | --- | --- |
@@ -296,55 +334,25 @@ Layout del tablero de Sheets (fila 1 = encabezados, gestionados por usted):
 Para generar solamente `dist\OficialiaDigitalDSA` sin requerir Inno Setup:
 
 ```powershell
+.\packaging\build_windows.ps1
+# Solo bundle, sin instalador:
 .\packaging\build_windows.ps1 -SinInstalador
 ```
-
-El workflow [`.github/workflows/build-windows-installer.yml`](.github/workflows/build-windows-installer.yml) se ejecuta manualmente o al publicar etiquetas `v*`. Publica el ejecutable como artefacto y lo adjunta a una GitHub Release solo para etiquetas.
-
-## Verificación
-
-El repositorio no declara una suite de pruebas automatizada ni un *linter*. Como verificación mínima del código fuente, ejecute:
-
-```bash
-python -m compileall -q config.py main.py database.py core rpa ui
-```
-
-La prueba funcional requiere un PDF válido y una configuración de Gemini. Para validar las rutas de salida sin conectar servicios institucionales, conserve `RPA_MODO=simulacion` y deje Google Sheets sin configurar; la extracción sigue requiriendo una clave Gemini válida.
 
 ## Estructura del repositorio
 
 ```text
-main.py                 Punto de entrada, composición y rutas de archivos
-config.py               Carga centralizada de .env y rutas de datos
-database.py             Esquema SQLite y repositorio de documentos
-core/                   Pipeline, PDF, IA, archivos, watcher y Sheets
-rpa/                    Adaptadores Playwright y simulación
-ui/                     Bandeja y revisión HITL con NiceGUI
-storage/                Directorios de tránsito documental versionados vacíos
-packaging/              PyInstaller, PowerShell e Inno Setup para Windows
-.github/workflows/      Construcción y publicación del instalador
+├── main.py                  # Composition root, servidor y ciclo de vida
+├── config.py                # Settings y rutas de datos
+├── database.py              # SQLite WAL, migraciones y auditoría
+├── core/                    # Pipeline, PDF, IA, heurística, storage y watcher
+├── rpa/playwright_rpa.py    # Simulación y automatización Webix
+├── ui/                      # Bandeja, layout y revisión HITL
+├── storage/                 # Artefactos operativos ignorados por Git
+├── tests/                   # Suite pytest aislada
+└── packaging/               # PyInstaller e Inno Setup
 ```
 
-## Contribución y operación
+---
 
-| Síntoma | Causa y remedio |
-| --- | --- |
-| Documentos caen en `DESCARTADO` con `AI_NO_CONFIGURADA` | Falta `GEMINI_API_KEY` en `.env` (comportamiento honesto: no hay stub de IA) |
-| `El registro en la Intranet falló (HTTP 401)` | Credenciales `INTRANET_HTTP_USERNAME/PASSWORD` inválidas; si la Intranet usa NTLM, habilite Negotiate para Chromium |
-| `FORMULARIO_WEBIX_TIMEOUT` | La Intranet no expone `op_ningr.fwx` en el iframe o los `view id` cambiaron — revise selectores |
-| El visor PDF no muestra el documento | El navegador debe tener visor PDF nativo (Chrome/Edge/Firefox modernos lo traen); use «Abrir en pestaña nueva» |
-| Watcher no detecta archivos sobre montaje SMB | Confirme `WATCHFOLDER_ENABLED=true`; el poll de respaldo (cada 5 s) barre el directorio de todos modos |
-| Puerto ocupado | Cambie `APP_PORT` en `.env` (o en `%ProgramData%\OficialiaDigitalDSA\.env` si usa el instalador Windows) |
-| `NAVEGADOR_NO_DISPONIBLE` | Ni Edge del sistema ni el Chromium empaquetado están disponibles — instale Microsoft Edge, o reinstale marcando el componente "Automatización RPA", o cambie `RPA_MODO=simulacion` |
-| (Instalador Windows) No abre el navegador solo | Ábralo manualmente en `http://127.0.0.1:8080`; revise la ventana de consola de la app por errores |
-| Botón "Confirmar seleccionados" omite un documento | Normal si no está en `PENDIENTE_REVISION` o si su método de extracción es `HEURISTICA_FALLBACK` (requiere edición manual campo por campo) — el motivo exacto queda en la notificación |
-1. Cree una rama de trabajo y mantenga los secretos fuera del repositorio.
-2. Cambie la configuración únicamente a través de `Configuracion` y `get_settings()`; los módulos no deben leer el entorno directamente.
-3. Ejecute la comprobación de compilación antes de abrir una revisión.
-4. Para cambios de empaquetado, pruebe el flujo de Windows y verifique tanto la instalación mínima como el componente opcional RPA.
-
-El proceso de despliegue disponible es el workflow de instalador: etiquetas con prefijo `v` producen un release, y las ejecuciones manuales producen un artefacto descargable. No hay infraestructura de despliegue de servidor declarada en este repositorio.
-
-## Licencia
-
-Propiedad intelectual de la División de Servicios Administrativos del Hospital Civil de Guadalajara. Uso interno restringido; no se autoriza su divulgación ni implementación externa.
+<div align="center"><strong>Licencia:</strong> propiedad intelectual de la División de Servicios Administrativos del Hospital Civil de Guadalajara. Uso interno restringido.</div>
