@@ -200,7 +200,14 @@ class Configuracion(BaseSettings):
                                          # OBLIGATORIO en la práctica, no un simple fallback
                                          # (ver rpa/playwright_rpa.py::_resolver_cve_oficialia).
     rpa_hcg_dependencia_cve: str = ""   # CVE de dependencia cuando procedencia = HCG
-    rpa_seccion_cve: str = ""           # CVE de sección (campo opcional 'seccion')
+    # Sección/Subsección archivística (campo opcional 'seccion' de op_ningr.fwx).
+    # Vacío ⇒ se deja sin seleccionar. Se busca por coincidencia difusa contra
+    # id/etiqueta del combo (ver _seleccionar_combo_por_texto), así que admite
+    # tanto el código ("0000") como parte del texto visible de la opción.
+    # Default "0000" = "Documentos de uso administrativo" — clasificación de
+    # la correspondencia rutinaria de la Oficialía; use "1000" ("Documentos
+    # de relevancia institucional") solo para el caso excepcional.
+    rpa_seccion_cve: str = "0000"
     rpa_navegador: str = "auto"         # 'auto' (Edge del sistema, respaldo Chromium empaquetado)
                                          # | 'msedge' | 'chromium' — ver rpa/playwright_rpa.py
 

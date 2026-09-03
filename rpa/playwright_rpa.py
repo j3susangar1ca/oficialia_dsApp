@@ -713,7 +713,10 @@ class RpaIntranet:
         self._asignar_webix(marco, "asunto", _limpiar_texto(metadatos.asunto))
 
         if self.config.rpa_seccion_cve:
-            self._asignar_webix_opcional(marco, "seccion", self.config.rpa_seccion_cve)
+            # Combo con datos precargados (a diferencia de 'cve'): se busca
+            # por coincidencia difusa de id/etiqueta en vez de asumir que
+            # RPA_SECCION_CVE coincide exacto con el id interno del control.
+            self._seleccionar_combo_por_texto(marco, "seccion", self.config.rpa_seccion_cve)
 
         self._asignar_webix_opcional(
             marco,
