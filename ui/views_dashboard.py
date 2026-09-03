@@ -1,24 +1,24 @@
-"""
-SISTEMA OFICIALIA-DIGITAL-DSA (reconstrucción 100% Python)
+﻿"""
+SISTEMA OFICIALIA-DIGITAL-DSA (reconstrucciÃ³n 100% Python)
 ==========================================================
-ui/views_dashboard.py — Bandeja de entrada (página principal).
+ui/views_dashboard.py â€” Bandeja de entrada (pÃ¡gina principal).
 
 Reproduce la bandeja del frontend Svelte original y la extiende con
 operativa de alto volumen:
     - Filtros de estado: Todos / Pendientes / En proceso / Errores RPA /
-      Completados (chips estilo pestaña).
+      Completados (chips estilo pestaÃ±a).
     - Contadores KPI siempre visibles.
     - Buscador en vivo (archivo, folio, remitente, asunto) + filtro de
-      rango de fechas de ingesta (útil sobre el histórico ya archivado).
-    - Tabla de documentos con badge de estado/método de extracción y
-      tiempo relativo; clic en una fila → vista de revisión HITL split-screen.
-    - Selección múltiple + **[Confirmar seleccionados]**: aprueba en lote
-      documentos PENDIENTE_REVISION tal cual los extrajo la IA — excluye
-      automáticamente los de extracción heurística (HEURISTICA_FALLBACK),
-      que exigen edición manual campo por campo (ver core.pipeline.
+      rango de fechas de ingesta (Ãºtil sobre el histÃ³rico ya archivado).
+    - Tabla de documentos con badge de estado/mÃ©todo de extracciÃ³n y
+      tiempo relativo; clic en una fila â†’ vista de revisiÃ³n HITL split-screen.
+    - SelecciÃ³n mÃºltiple + **[Confirmar seleccionados]**: aprueba en lote
+      documentos PENDIENTE_REVISION tal cual los extrajo la IA â€” excluye
+      automÃ¡ticamente los de extracciÃ³n heurÃ­stica (HEURISTICA_FALLBACK),
+      que exigen ediciÃ³n manual campo por campo (ver core.pipeline.
       FlujoDocumental.confirmar_lote).
-    - Dropzone de carga manual (canal WEB_DRAG_DROP) con validación de
-      tamaño/extensión; el pipeline de fondo hace el resto.
+    - Dropzone de carga manual (canal WEB_DRAG_DROP) con validaciÃ³n de
+      tamaÃ±o/extensiÃ³n; el pipeline de fondo hace el resto.
     - Refresco en vivo por `ui.timer` (sustituye el WebSocket original:
       SQLite local + polling de 2 s es suficiente para LAN departamental).
 """
@@ -42,20 +42,20 @@ from ui.layout import (
 
 logger = logging.getLogger("oficialia.ui.dashboard")
 
-#: Refresco de la bandeja (ms) — reemplaza los eventos WebSocket.
+#: Refresco de la bandeja (ms) â€” reemplaza los eventos WebSocket.
 INTERVALO_REFRESCO_S = 2.0
 
-#: Columnas de la tabla (etiquetas del original + método de extracción).
+#: Columnas de la tabla (etiquetas del original + mÃ©todo de extracciÃ³n).
 COLUMNAS = [
     {"name": "archivo", "label": "Archivo original", "field": "archivo", "align": "left", "sortable": True},
     {"name": "oficio", "label": "Oficio", "field": "oficio", "align": "left", "sortable": True},
     {"name": "estado", "label": "Estado", "field": "estado", "align": "left"},
-    {"name": "metodo", "label": "Extracción", "field": "metodo", "align": "left"},
-    {"name": "paginas", "label": "Págs.", "field": "paginas", "align": "right", "sortable": True},
+    {"name": "metodo", "label": "ExtracciÃ³n", "field": "metodo", "align": "left"},
+    {"name": "paginas", "label": "PÃ¡gs.", "field": "paginas", "align": "right", "sortable": True},
     {"name": "ingreso", "label": "Ingreso", "field": "ingreso", "align": "left", "sortable": True},
 ]
 
-#: Mapa estado → color de badge de Quasar (paleta del estadoMeta original).
+#: Mapa estado â†’ color de badge de Quasar (paleta del estadoMeta original).
 COLORES_BADGE = {
     "INGESTADO": "grey-3",
     "EN_PREPROCESO": "info",
@@ -67,10 +67,10 @@ COLORES_BADGE = {
     "DESCARTADO": "grey-6",
 }
 
-#: Etiqueta + color del método de extracción (columna "Extracción").
+#: Etiqueta + color del mÃ©todo de extracciÃ³n (columna "ExtracciÃ³n").
 METODO_ETIQUETA = {
     MetodoExtraccion.IA.value: ("Gemini IA", "grey-7"),
-    MetodoExtraccion.HEURISTICA_FALLBACK.value: ("Heurística ⚠", "orange-8"),
+    MetodoExtraccion.HEURISTICA_FALLBACK.value: ("HeurÃ­stica âš ", "orange-8"),
     MetodoExtraccion.HITL.value: ("Manual", "grey-7"),
 }
 
@@ -84,7 +84,7 @@ def _fila_de_tabla(documento) -> dict:
     return {
         "id": documento.id,
         "archivo": documento.nombre_archivo_original,
-        "oficio": documento.numero_oficio or "—",
+        "oficio": documento.numero_oficio or "â€”",
         "estado": info.etiqueta,
         "estado_color": COLORES_BADGE.get(documento.estado.value, "grey-6"),
         "metodo": metodo_etiqueta,
@@ -102,7 +102,7 @@ def pagina_bandeja() -> None:
     capturista: dict = {"valor": "CAPTURISTA-DEV"}
     estado_ui: dict = {"grupo": "pendientes", "busqueda": ""}
     # Evita enviar actualizaciones WebSocket de la tabla/KPIs cuando SQLite
-    # no ha cambiado; el timer sigue siendo barato y no recarga la página.
+    # no ha cambiado; el timer sigue siendo barato y no recarga la pÃ¡gina.
     refresco_visto: dict = {"filas": None, "kpis": None}
 
     # El encabezado es un layout de primer nivel (fuera del contenedor).
@@ -116,21 +116,21 @@ def pagina_bandeja() -> None:
         documentos = obtener_pipeline().repo.listar(
             estados=list(grupo.estados) if grupo.estados else None,
             texto_busqueda=estado_ui["busqueda"],
-            fecha_desde=estado_ui["fecha_desde"] or None,
-            fecha_hasta=estado_ui["fecha_hasta"] or None,
+            fecha_desde=estado_ui.get("fecha_desde") or None,
+            fecha_hasta=estado_ui.get("fecha_hasta") or None,
         )
         return [_fila_de_tabla(doc) for doc in documentos]
 
     # Filas iniciales calculadas ANTES de construir la tabla: con
-    # selection="multiple", crear el ui.table con rows=[] y poblarlo recién
-    # después (tabla.rows = […]; tabla.update()) deja el checkbox "seleccionar
-    # todo" de Quasar en un estado intermedio inconsistente (arranca vacío,
+    # selection="multiple", crear el ui.table con rows=[] y poblarlo reciÃ©n
+    # despuÃ©s (tabla.rows = [â€¦]; tabla.update()) deja el checkbox "seleccionar
+    # todo" de Quasar en un estado intermedio inconsistente (arranca vacÃ­o,
     # luego se llena) que dispara un TypeError interno de Quasar en el
     # navegador (verificado: no rompe la funcionalidad, pero es evitable).
-    # Pasar las filas reales desde el constructor evita esa transición.
+    # Pasar las filas reales desde el constructor evita esa transiciÃ³n.
     try:
         filas_iniciales = _calcular_filas()
-    except Exception:  # noqa: BLE001 — igual que _refrescar(): la UI nunca debe romperse
+    except Exception:  # noqa: BLE001 â€” igual que _refrescar(): la UI nunca debe romperse
         logger.exception("Error calculando las filas iniciales de la bandeja")
         filas_iniciales = []
 
@@ -143,7 +143,7 @@ def pagina_bandeja() -> None:
         chips: list[tuple[ui.button, object]] = []
 
         def _repintar_chips() -> None:
-            """Recolorea los chips según el grupo activo."""
+            """Recolorea los chips segÃºn el grupo activo."""
             for chip, grupo in chips:
                 if grupo.id == estado_ui["grupo"]:
                     chip.classes("bg-primary text-white", remove="bg-slate-100 text-slate-500 hover:bg-slate-200")
@@ -169,13 +169,13 @@ def pagina_bandeja() -> None:
                     chips.append((chip, grupo))
 
             # OJO: se escribe en estado_ui DIRECTO desde el evento (e.value),
-            # no solo vía bind_value_to — bind_value_to propaga por el bucle
-            # de refresco periódico de NiceGUI (no sincrónico), así que
-            # _refrescar() podía correr con el valor previo todavía en el
-            # diccionario si dependía solo del binding. bind_value_to se deja
+            # no solo vÃ­a bind_value_to â€” bind_value_to propaga por el bucle
+            # de refresco periÃ³dico de NiceGUI (no sincrÃ³nico), asÃ­ que
+            # _refrescar() podÃ­a correr con el valor previo todavÃ­a en el
+            # diccionario si dependÃ­a solo del binding. bind_value_to se deja
             # igual para el resto de la UI reactiva (ej. visibilidad de
             # "Limpiar rango"), donde la eventual consistencia no importa.
-            ui.input(placeholder="Buscar por archivo, folio, remitente o asunto…").classes(
+            ui.input(placeholder="Buscar por archivo, folio, remitente o asuntoâ€¦").classes(
                 "w-72"
             ).props('dense outlined color=primary clearable debounce="300"').bind_value_to(
                 estado_ui, "busqueda"
@@ -205,7 +205,7 @@ def pagina_bandeja() -> None:
             ui.button("Confirmar seleccionados", icon="playlist_add_check").props(
                 "color=primary no-caps dense"
             ).on_click(lambda: _confirmar_lote())
-            ui.button("Quitar selección", icon="close").props("flat dense no-caps color=grey").on_click(
+            ui.button("Quitar selecciÃ³n", icon="close").props("flat dense no-caps color=grey").on_click(
                 lambda: _limpiar_seleccion()
             )
         barra_lote.bind_visibility_from(
@@ -215,16 +215,16 @@ def pagina_bandeja() -> None:
         # ---------------- Tabla de documentos ----------------
         # OJO: `pagination` va como kwarg del constructor (Table lo envuelve en
         # {'rowsPerPage': N}, el objeto que espera QTable), NUNCA como texto en
-        # .props("pagination=25") — un valor plano ahí, combinado con
-        # rows-per-page-options, deja el objeto de paginación interno de Quasar
-        # inválido y la tabla renderiza 0 filas pese a tener datos (bug real,
-        # verificado en navegador: nunca antes se había probado esta pantalla
+        # .props("pagination=25") â€” un valor plano ahÃ­, combinado con
+        # rows-per-page-options, deja el objeto de paginaciÃ³n interno de Quasar
+        # invÃ¡lido y la tabla renderiza 0 filas pese a tener datos (bug real,
+        # verificado en navegador: nunca antes se habÃ­a probado esta pantalla
         # fuera de un curl/HTTP plano).
-        # `on_select` se conecta DESPUÉS de construir la tabla, no como kwarg
-        # del constructor: pasarlo ahí lo registra antes de que el componente
+        # `on_select` se conecta DESPUÃ‰S de construir la tabla, no como kwarg
+        # del constructor: pasarlo ahÃ­ lo registra antes de que el componente
         # QTable de Quasar termine de montarse en el cliente y dispara un
         # TypeError interno de Quasar en cada carga (verificado en navegador;
-        # no rompía la selección en sí, pero es evitable).
+        # no rompÃ­a la selecciÃ³n en sÃ­, pero es evitable).
         tabla = ui.table(
             columns=COLUMNAS, rows=filas_iniciales, row_key="id", selection="multiple", pagination=25,
         ).classes("w-full shadow-1").props(
@@ -255,7 +255,7 @@ def pagina_bandeja() -> None:
             with ui.row().classes("items-center justify-between no-wrap gap-4 w-full"):
                 with ui.column().classes("gap-0"):
                     ui.label("Carga manual de oficios (PDF)").classes("text-sm font-semibold text-slate-700")
-                    ui.label("Arrastre o seleccione archivos; el pipeline los procesará automáticamente.").classes(
+                    ui.label("Arrastre o seleccione archivos; el pipeline los procesarÃ¡ automÃ¡ticamente.").classes(
                         "text-xs text-slate-400"
                     )
                 ui.upload(
@@ -292,7 +292,7 @@ def pagina_bandeja() -> None:
                 for clave, etiqueta in kpis.items():
                     etiqueta.set_text(str(valores_kpi.get(clave, 0)))
                 refresco_visto["kpis"] = valores_kpi
-        except Exception:  # noqa: BLE001 — la UI nunca debe romperse por un refresh
+        except Exception:  # noqa: BLE001 â€” la UI nunca debe romperse por un refresh
             logger.exception("Error refrescando la bandeja")
 
     def _limpiar_seleccion() -> None:
@@ -309,7 +309,7 @@ def pagina_bandeja() -> None:
         try:
             resultado = await run.io_bound(pipeline.confirmar_lote, ids, revisor)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Fallo la confirmación en lote")
+            logger.exception("Fallo la confirmaciÃ³n en lote")
             ui.notify(f"No se pudo confirmar el lote: {exc}", type="negative", position="top")
             return
 
@@ -319,9 +319,9 @@ def pagina_bandeja() -> None:
                 type="positive", position="top",
             )
         if resultado.omitidos:
-            detalle = "; ".join(f"{doc_id[:8]}…: {motivo}" for doc_id, motivo in resultado.omitidos[:5])
+            detalle = "; ".join(f"{doc_id[:8]}â€¦: {motivo}" for doc_id, motivo in resultado.omitidos[:5])
             if len(resultado.omitidos) > 5:
-                detalle += f" (+{len(resultado.omitidos) - 5} más)"
+                detalle += f" (+{len(resultado.omitidos) - 5} mÃ¡s)"
             ui.notify(
                 f"{len(resultado.omitidos)} documento(s) omitido(s): {detalle}",
                 type="warning", position="top", multi_line=True, timeout=8000,
@@ -342,19 +342,19 @@ def pagina_bandeja() -> None:
             return
         if len(contenido) > config.max_upload_bytes:
             ui.notify(
-                f"'{nombre}' excede el límite de {config.max_upload_bytes // (1024 * 1024)} MB.",
+                f"'{nombre}' excede el lÃ­mite de {config.max_upload_bytes // (1024 * 1024)} MB.",
                 type="negative",
                 position="top",
             )
             return
         if not contenido:
-            ui.notify(f"'{nombre}' llegó vacío; se ignora.", type="warning", position="top")
+            ui.notify(f"'{nombre}' llegÃ³ vacÃ­o; se ignora.", type="warning", position="top")
             return
 
         try:
             pipeline.programar_ingesta(nombre, OrigenIngesta.WEB_DRAG_DROP, contenido)
             ui.notify(
-                f"'{nombre}' recibido: preprocesando y extrayendo metadatos…",
+                f"'{nombre}' recibido: preprocesando y extrayendo metadatosâ€¦",
                 type="positive",
                 position="top",
             )
@@ -362,7 +362,7 @@ def pagina_bandeja() -> None:
             _repintar_chips()
             _limpiar_seleccion()
             _refrescar()
-        except DocumentoDuplicado as exc:  # teórico: se lanza en el hilo de fondo
+        except DocumentoDuplicado as exc:  # teÃ³rico: se lanza en el hilo de fondo
             ui.notify(f"Documento duplicado: {exc}", type="warning", position="top")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fallo al encolar la carga de %s", nombre)
@@ -371,3 +371,4 @@ def pagina_bandeja() -> None:
     _repintar_chips()
     ui.timer(INTERVALO_REFRESCO_S, _refrescar)
     _refrescar()
+
