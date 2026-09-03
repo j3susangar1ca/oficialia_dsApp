@@ -25,13 +25,11 @@ from nicegui import ui
 from core.models import GRUPOS_BANDEJA, OrigenIngesta, meta_estado
 from core.pipeline import DocumentoDuplicado
 from ui.layout import (
-    actualizar_kpis,
     encabezado,
     obtener_config,
     obtener_pipeline,
     panel_kpis,
     aplicar_tema,
-    tarjeta_vacia,
     tiempo_relativo,
 )
 
@@ -83,6 +81,9 @@ def pagina_bandeja() -> None:
     aplicar_tema()
     capturista: dict = {"valor": "CAPTURISTA-DEV"}
     estado_ui: dict = {"grupo": "pendientes", "busqueda": ""}
+    # Evita enviar actualizaciones WebSocket de la tabla/KPIs cuando SQLite
+    # no ha cambiado; el timer sigue siendo barato y no recarga la página.
+    refresco_visto: dict = {"filas": None, "kpis": None}
 
     # El encabezado es un layout de primer nivel (fuera del contenedor).
     encabezado(capturista)
@@ -174,9 +175,21 @@ def pagina_bandeja() -> None:
                 estados=list(grupo.estados) if grupo.estados else None,
                 texto_busqueda=estado_ui["busqueda"],
             )
-            tabla.rows = [_fila_de_tabla(doc) for doc in documentos]
-            tabla.update()
-            actualizar_kpis(kpis)
+            filas = [_fila_de_tabla(doc) for doc in documentos]
+            firma_filas = tuple(
+                (fila["id"], fila["estado"], fila["oficio"], fila["paginas"], fila["_orden"])
+                for fila in filas
+            )
+            if firma_filas != refresco_visto["filas"]:
+                tabla.rows = filas
+                tabla.update()
+                refresco_visto["filas"] = firma_filas
+
+            valores_kpi = obtener_pipeline().repo.contadores_kpi()
+            if valores_kpi != refresco_visto["kpis"]:
+                for clave, etiqueta in kpis.items():
+                    etiqueta.set_text(str(valores_kpi.get(clave, 0)))
+                refresco_visto["kpis"] = valores_kpi
         except Exception:  # noqa: BLE001 — la UI nunca debe romperse por un refresh
             logger.exception("Error refrescando la bandeja")
 
