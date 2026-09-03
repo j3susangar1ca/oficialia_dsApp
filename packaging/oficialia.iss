@@ -70,11 +70,11 @@ Name: "rpa"; Description: "Automatización RPA — navegador Chromium (~300 MB, 
 ; Aplicación (PyInstaller onedir) sin el navegador — ese va aparte, como
 ; componente opcional, para no obligar a descargarlo si no se usa RPA real.
 Source: "{#MyDistDir}\*"; Excludes: "pw-browsers\*"; DestDir: "{app}"; \
-    Flags: ignoreversion recursesubdirs createallsubdirfolders; Components: app
+    Flags: ignoreversion recursesubdirs createallsubdirs; Components: app
 
 ; Navegador Chromium de Playwright (componente opcional "rpa").
 Source: "{#MyDistDir}\pw-browsers\*"; DestDir: "{app}\pw-browsers"; \
-    Flags: ignoreversion recursesubdirs createallsubdirfolders; Components: rpa
+    Flags: ignoreversion recursesubdirs createallsubdirs; Components: rpa
 
 ; Plantilla de configuración: se coloca directamente como ".env" en la
 ; carpeta de datos SOLO si no existe ya (instalación limpia o reinstalo
