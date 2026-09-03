@@ -246,7 +246,9 @@ def pagina_bandeja() -> None:
         )
         tabla.on(
             "rowClick",
-            lambda e: ui.navigate.to(f"/revision/{e.args['row']['id']}"),
+            lambda e: ui.navigate.to(
+                f"/revision/{e.args[1]['id'] if isinstance(e.args, list) and len(e.args) > 1 else e.args.get('row', {}).get('id')}"
+            ),
         )
         tabla.on_select(lambda e: estado_ui.update(seleccion=[fila["id"] for fila in tabla.selected]))
 
