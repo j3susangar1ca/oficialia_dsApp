@@ -221,7 +221,10 @@ class TestResolverCveOficialia:
 
     @pytest.fixture
     def rpa(self, configuracion):
-        cfg = configuracion.model_copy(update={"rpa_modo": "playwright"})
+        # rpa_oficialia_cve explícitamente vacío: estas pruebas ejercitan
+        # justamente la ruta de auto-resolución cuando NO está configurado
+        # (el default real de Configuracion ya no es "", ver config.py).
+        cfg = configuracion.model_copy(update={"rpa_modo": "playwright", "rpa_oficialia_cve": ""})
         return RpaIntranet(cfg)
 
     def test_usa_rpa_oficialia_cve_sin_tocar_el_combo(self, configuracion):
