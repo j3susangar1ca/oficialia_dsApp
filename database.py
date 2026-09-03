@@ -410,7 +410,7 @@ class RepositorioDocumentos:
 
         with self._conexion() as conn:
             filas = conn.execute(sql, parametros).fetchall()
-        return [self._a_modelo(f) for fila in filas]
+        return [self._a_modelo(fila) for fila in filas]
 
     def contadores_kpi(self) -> dict[str, int]:
         """KPIs de la bandeja: pendientes, en proceso, errores, completados y total."""
