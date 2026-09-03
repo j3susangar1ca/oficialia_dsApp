@@ -190,13 +190,15 @@ class Configuracion(BaseSettings):
     # solo en el `.env` local, nunca en este archivo ni en `.env.example`).
     rpa_usuario: str = "2010226"
     rpa_password: str = ""
-    rpa_oficialia_cve: str = ""         # CVE de oficialía (combo Webix 'cve'). Vacío ⇒ se
-                                         # toma la primera opción del combo — RECOMENDADO
-                                         # configurarla explícita si la cuenta RPA_USUARIO
-                                         # tiene asignada más de una oficialía, o si el
-                                         # combo tarda en cargar y produce FORMULARIO_
-                                         # WEBIX_TIMEOUT (ver rpa/playwright_rpa.py::
-                                         # _resolver_cve_oficialia).
+    rpa_oficialia_cve: str = "FDSA"      # CVE de oficialía (combo Webix 'cve') — (FDSA)
+                                         # División de Servicios Administrativos, confirmado
+                                         # para esta instalación (RPA_USUARIO=2010226). Vacío
+                                         # ⇒ se intenta tomar la primera opción del combo, pero
+                                         # en esta Intranet el combo nunca carga sus opciones
+                                         # por sí solo (confirmado vacío incluso forzando
+                                         # open()/close() desde el RPA) — este valor es
+                                         # OBLIGATORIO en la práctica, no un simple fallback
+                                         # (ver rpa/playwright_rpa.py::_resolver_cve_oficialia).
     rpa_hcg_dependencia_cve: str = ""   # CVE de dependencia cuando procedencia = HCG
     rpa_seccion_cve: str = ""           # CVE de sección (campo opcional 'seccion')
     rpa_navegador: str = "auto"         # 'auto' (Edge del sistema, respaldo Chromium empaquetado)

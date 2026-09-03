@@ -736,15 +736,21 @@ class RpaIntranet:
 
     def _resolver_cve_oficialia(self, marco) -> str:
         """
-        CVE configurada (RPA_OFICIALIA_CVE, recomendado en producción), o —
-        a falta de ella — la primera opción del combo 'cve' del formulario.
+        CVE configurada (RPA_OFICIALIA_CVE), o — a falta de ella — la
+        primera opción del combo 'cve' del formulario.
 
         El combo 'cve' está ligado a un `suggest` (ver docs/rpa/webix_dump_
         for_qwen.json): en varias instalaciones Webix ese tipo de control
         solo dispara su carga AJAX al ABRIRSE, no al inicializarse el
         formulario, así que aquí se fuerza un open()/close() inofensivo
-        antes de sondear — sin eso, `getFirstData()` puede seguir vacío
-        pese a que el combo sí tiene opciones disponibles en el servidor.
+        antes de sondear. CONFIRMADO en vivo (RPA_USUARIO=2010226,
+        RPA_HEADLESS=false): en esta Intranet el combo permanece vacío
+        incluso con ese forzado — no es solo un problema de timing, sino
+        de cómo esta instancia puebla el control. Por eso RPA_OFICIALIA_CVE
+        (FDSA por defecto — (FDSA) División de Servicios Administrativos)
+        es en la práctica OBLIGATORIO para esta instalación, no un
+        fallback opcional; el sondeo del combo se conserva como respaldo
+        por si una futura versión de la Intranet sí lo puebla solo.
         """
         if self.config.rpa_oficialia_cve:
             return self.config.rpa_oficialia_cve
