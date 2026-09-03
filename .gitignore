@@ -1,0 +1,20 @@
+# Entorno
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Secretos
+.env
+
+# Datos operativos locales
+data/*.db
+data/*.db-*
+data/tablero_local.csv
+
+# Documentos del ciclo de vida físico
+storage/01_entrada/*
+storage/02_en_proceso/*
+storage/03_procesados/*
+storage/04_errores/*
+!storage/**/.gitkeep
