@@ -5,10 +5,14 @@ rpa/playwright_rpa.py — Automatización de la Intranet institucional Webix.
 
 Puerta de entrada de la Intranet SII HCG (`op_cucs.fwx` con el formulario
 embebido en el iframe `op_ningr.fwx`). Migración 1:1 del
-`PlaywrightRpaAdapter` original: selectores mapeados desde
-`docs/rpa/webix_dump_for_qwen.json`, relleno de los controles Webix por
-`view id` vía `webix.$$().setValue()`, subida del PDF canónico, captura del
-acuse institucional y screenshot de evidencia.
+`PlaywrightRpaAdapter` original: navegación al submódulo de captura dentro
+del tabbar DHTMLX (`_abrir_submodulo_ingreso` — tras el login, la pestaña
+activa 'a1' carga por omisión OTRO submódulo, op_ningr.fwx solo aparece al
+invocar `myTabbar.tabs('a1').attachURL(...)`, con respaldo por clic sobre
+el botón del Ribbon "Ingr. ofic." o el nodo del árbol "Ingresar documento"),
+selectores mapeados desde `docs/rpa/webix_dump_for_qwen.json`, relleno de
+los controles Webix por `view id` vía `webix.$$().setValue()`, subida del
+PDF canónico, captura del acuse institucional y screenshot de evidencia.
 
 Modo dual (config.RPA_MODO):
     - 'playwright' (default de esta instalación): automatización REAL con
@@ -70,6 +74,18 @@ URL_INTRANET_POR_DEFECTO = "https://sii.hcg.gob.mx/intranet/op_cucs.fwx"
 
 #: Selector del iframe que contiene el formulario de ingreso.
 SELECTOR_IFRAME = 'iframe[src*="op_ningr.fwx"]'
+
+#: Ruta del submódulo de captura dentro del tabbar DHTMLX de op_cucs.fwx.
+RUTA_SUBMODULO_INGRESO = "/intranet/op_ningr.fwx"
+
+#: Respaldo visual si la API de DHTMLX no respondió: botón del Ribbon
+#: "Ingr. ofic." (Oficialía → id 3) o nodo del árbol lateral "Ingresar
+#: documento" (Oficialía de partes → Oficialía de entrada) — ambos
+#: caminos de la interfaz institucional invocan el mismo attachURL
+#: (ver docs/rpa/webix_dump_for_qwen.json).
+SELECTOR_SUBMODULO_INGRESO = (
+    '.dhxrb_3rows_button:has-text("Ingr. ofic."), span.standartTreeRow:has-text("Ingresar documento")'
+)
 
 #: Regex de folios institucionales de confirmación (ej. HCG-OP-2026-009821).
 REGEX_FOLIO = re.compile(r"(HCG-OP-\d{4}-\d{4,}|[A-Z]{2,}(?:[-/][A-Z0-9]+)*-\d{4}-\d{3,})")
@@ -345,6 +361,7 @@ class RpaIntranet:
                             "La sesión de la Intranet ha expirado (redirect a login).",
                         )
 
+                    self._abrir_submodulo_ingreso(pagina)
                     marco = self._resolver_marco_op_ningr(pagina)
                     self._esperar_webix_listo(marco)
 
@@ -540,6 +557,53 @@ class RpaIntranet:
             "FORMULARIO_WEBIX_TIMEOUT",
             f"{descripcion} no disponible tras {reintentos} intentos ({timeout}ms c/u): {ultimo_error}",
         )
+
+    def _abrir_submodulo_ingreso(self, pagina) -> None:
+        """
+        Navega al submódulo de captura (op_ningr.fwx) dentro de la pestaña
+        activa ('a1') del tabbar DHTMLX de op_cucs.fwx.
+
+        Tras el login, op_cucs.fwx carga por omisión OTRO submódulo en esa
+        pestaña (op_ofic.fwx) — el formulario de ingreso solo aparece al
+        invocar `myTabbar.tabs('a1').attachURL('/intranet/op_ningr.fwx')`,
+        que en la interfaz institucional dispara tanto el botón del Ribbon
+        "Ingr. ofic." como el nodo del árbol "Ingresar documento" (Oficialía
+        de partes → Oficialía de entrada). Se intenta primero la API de
+        DHTMLX directamente — no depende de que el botón esté visible ni
+        de la geometría del Ribbon — y solo si no está disponible (versión
+        distinta de la interfaz, script aún no inicializado) se cae al clic
+        visual sobre el botón o el nodo del árbol.
+        """
+        logger.info("[RPA] Abriendo submódulo 'Ingresar oficio / documento'...")
+        try:
+            navegado = pagina.evaluate(
+                "(ruta) => {"
+                "  if (window.myTabbar && typeof window.myTabbar.tabs === 'function') {"
+                "    const pestana = window.myTabbar.tabs('a1');"
+                "    if (pestana && typeof pestana.attachURL === 'function') {"
+                "      pestana.attachURL(ruta);"
+                "      return true;"
+                "    }"
+                "  }"
+                "  return false;"
+                "}",
+                RUTA_SUBMODULO_INGRESO,
+            )
+        except Exception:  # noqa: BLE001 — se recurre al respaldo visual
+            navegado = False
+
+        if navegado:
+            return
+
+        try:
+            boton = pagina.locator(SELECTOR_SUBMODULO_INGRESO).first
+            boton.wait_for(state="visible", timeout=min(self.config.rpa_timeout_ms, 8000))
+            boton.click()
+        except Exception as exc:  # noqa: BLE001
+            raise ErrorRpa(
+                "FORMULARIO_WEBIX_TIMEOUT",
+                f"No fue posible abrir el submódulo 'Ingresar oficio' (ni por API DHTMLX ni por clic): {exc}",
+            ) from exc
 
     def _resolver_marco_op_ningr(self, pagina):
         """Resuelve el iframe op_ningr.fwx con reintentos y verificación de contentFrame."""

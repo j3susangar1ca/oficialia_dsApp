@@ -1,7 +1,8 @@
 """
-tests/test_rpa.py — Backoff exponencial con jitter y persistencia de
-sesión del worker RPA (rpa/playwright_rpa.py), sin lanzar un navegador
-real: ambas piezas son testeables de forma aislada.
+tests/test_rpa.py — Backoff exponencial con jitter, persistencia de sesión
+y navegación al submódulo de captura del worker RPA (rpa/playwright_rpa.py),
+sin lanzar un navegador real: todo es testeable de forma aislada con dobles
+mínimos de la API sync de Playwright (Page/Locator).
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import time
 
 import pytest
 
-from rpa.playwright_rpa import GestorSesiones, RpaIntranet
+from rpa.playwright_rpa import ErrorRpa, GestorSesiones, RpaIntranet, RUTA_SUBMODULO_INGRESO
 
 
 class ContextoFalso:
@@ -106,3 +107,84 @@ class TestGestorSesiones:
         os.utime(gs._ruta, (time.time() - 25 * 3600, time.time() - 25 * 3600))
         assert gs.limpiar_expiradas(ttl_horas=24) == 1
         assert gs.tiene_estado is False
+
+
+class _LocatorFalso:
+    """Doble mínimo de `playwright.sync_api.Locator` (solo lo que usa _abrir_submodulo_ingreso)."""
+
+    def __init__(self, visible: bool = True):
+        self.visible = visible
+        self.click_llamado = False
+
+    @property
+    def first(self) -> "_LocatorFalso":
+        return self
+
+    def wait_for(self, state: str = "visible", timeout: float = 0) -> None:
+        if not self.visible:
+            raise TimeoutError("Elemento no visible dentro del timeout")
+
+    def click(self) -> None:
+        self.click_llamado = True
+
+
+class _PaginaFalsa:
+    """Doble mínimo de `playwright.sync_api.Page` para _abrir_submodulo_ingreso."""
+
+    def __init__(self, *, resultado_evaluate: bool = True, lanza_evaluate: bool = False, boton_visible: bool = True):
+        self.resultado_evaluate = resultado_evaluate
+        self.lanza_evaluate = lanza_evaluate
+        self.llamadas_evaluate: list[tuple[str, object]] = []
+        self.locator_falso = _LocatorFalso(visible=boton_visible)
+
+    def evaluate(self, script: str, arg: object = None):
+        self.llamadas_evaluate.append((script, arg))
+        if self.lanza_evaluate:
+            raise RuntimeError("window.myTabbar no definido en esta versión de la interfaz")
+        return self.resultado_evaluate
+
+    def locator(self, selector: str) -> _LocatorFalso:
+        return self.locator_falso
+
+
+class TestAbrirSubmoduloIngreso:
+    """
+    Navegación al submódulo op_ningr.fwx dentro del tabbar DHTMLX de
+    op_cucs.fwx (ver docs/rpa/webix_dump_for_qwen.json): tras el login la
+    pestaña activa 'a1' carga por omisión OTRO submódulo, así que sin este
+    paso _resolver_marco_op_ningr esperaría indefinidamente un iframe que
+    nunca llega a crearse.
+    """
+
+    @pytest.fixture
+    def rpa(self, configuracion):
+        cfg = configuracion.model_copy(update={"rpa_modo": "playwright"})
+        return RpaIntranet(cfg)
+
+    def test_usa_la_api_dhtmlx_cuando_myTabbar_esta_disponible(self, rpa):
+        pagina = _PaginaFalsa(resultado_evaluate=True)
+        rpa._abrir_submodulo_ingreso(pagina)
+
+        assert len(pagina.llamadas_evaluate) == 1
+        _script, ruta = pagina.llamadas_evaluate[0]
+        assert ruta == RUTA_SUBMODULO_INGRESO
+        assert pagina.locator_falso.click_llamado is False  # nunca cayó al respaldo visual
+
+    def test_cae_al_clic_visual_si_dhtmlx_no_respondio(self, rpa):
+        pagina = _PaginaFalsa(resultado_evaluate=False)
+        rpa._abrir_submodulo_ingreso(pagina)
+
+        assert pagina.locator_falso.click_llamado is True
+
+    def test_cae_al_clic_visual_si_evaluate_lanza_excepcion(self, rpa):
+        pagina = _PaginaFalsa(lanza_evaluate=True)
+        rpa._abrir_submodulo_ingreso(pagina)
+
+        assert pagina.locator_falso.click_llamado is True
+
+    def test_error_formulario_webix_timeout_si_ni_api_ni_clic_funcionan(self, rpa):
+        pagina = _PaginaFalsa(resultado_evaluate=False, boton_visible=False)
+
+        with pytest.raises(ErrorRpa) as info:
+            rpa._abrir_submodulo_ingreso(pagina)
+        assert info.value.codigo == "FORMULARIO_WEBIX_TIMEOUT"
