@@ -1,31 +1,55 @@
-﻿"""
-SISTEMA OFICIALIA-DIGITAL-DSA (reconstrucciÃ³n 100% Python)
+"""
+SISTEMA OFICIALIA-DIGITAL-DSA (reconstrucción 100% Python)
 ==========================================================
-ui/views_dashboard.py â€” Bandeja de entrada (pÃ¡gina principal).
+ui/views_dashboard.py — Bandeja de entrada (página principal).
 
 Reproduce la bandeja del frontend Svelte original y la extiende con
-operativa de alto volumen:
-    - Filtros de estado: Todos / Pendientes / En proceso / Errores RPA /
-      Completados (chips estilo pestaÃ±a).
-    - Contadores KPI siempre visibles.
-    - Buscador en vivo (archivo, folio, remitente, asunto) + filtro de
-      rango de fechas de ingesta (Ãºtil sobre el histÃ³rico ya archivado).
-    - Tabla de documentos con badge de estado/mÃ©todo de extracciÃ³n y
-      tiempo relativo; clic en una fila â†’ vista de revisiÃ³n HITL split-screen.
-    - SelecciÃ³n mÃºltiple + **[Confirmar seleccionados]**: aprueba en lote
-      documentos PENDIENTE_REVISION tal cual los extrajo la IA â€” excluye
-      automÃ¡ticamente los de extracciÃ³n heurÃ­stica (HEURISTICA_FALLBACK),
-      que exigen ediciÃ³n manual campo por campo (ver core.pipeline.
+operativa de alto volumen. Auditoría de UI/UX aplicada en esta revisión
+(ver historial de commits para el detalle completo):
+
+    - Las tarjetas KPI (Todos / Pendientes / En proceso / Errores RPA /
+      Completados) son AHORA el único selector de estado de la bandeja:
+      antes existía una fila de pestañas por debajo duplicando exactamente
+      los mismos cuatro estados — un solo control con estado activo visible
+      reduce el desorden y la carga cognitiva (ver ui.layout.panel_kpis_filtro).
+    - Barra de herramientas única: buscador + rango de fechas + indicador
+      "Actualizado hace…" + exportar CSV + CTA primario "Subir PDFs", todos
+      en una sola fila (antes el rango de fechas flotaba en una tercera
+      línea desalineada y la carga manual quedaba al final de la pantalla,
+      fuera del viewport en bandejas largas).
+    - Carga manual (canal WEB_DRAG_DROP) movida a un diálogo modal disparado
+      desde el CTA de la barra de herramientas, con microcopia de límites
+      (tamaño máximo, formato) — en vez de una franja al pie de la página.
+    - Columna "Estado" compuesta: badge de estado + calificador secundario
+      ("Revisión manual campo por campo") solo cuando la extracción fue por
+      respaldo heurístico, en vez de una columna "Extracción" aparte casi
+      vacía con una etiqueta ambigua muy similar a la de estado.
+    - Columna "Remitente" visible en la tabla: el buscador promete poder
+      buscar por remitente/asunto, así que el resultado debe poder
+      verificarse a simple vista sin abrir cada oficio.
+    - Estados vacíos explícitos ("—") en Oficio/Remitente/Págs. en vez de
+      celdas en blanco.
+    - Tiempo relativo ("hace 13 h") + tooltip con fecha/hora absoluta
+      (ver ui.layout.tiempo_absoluto) — trazabilidad exigible en un entorno
+      con validez legal/administrativa.
+    - Región `aria-live="polite"` que anuncia el tamaño de la vista actual
+      para lectores de pantalla al terminar cada refresco.
+    - Selección múltiple + **[Confirmar seleccionados]**: aprueba en lote
+      documentos PENDIENTE_REVISION tal cual los extrajo la IA — excluye
+      automáticamente los de extracción heurística (HEURISTICA_FALLBACK),
+      que exigen edición manual campo por campo (ver core.pipeline.
       FlujoDocumental.confirmar_lote).
-    - Dropzone de carga manual (canal WEB_DRAG_DROP) con validaciÃ³n de
-      tamaÃ±o/extensiÃ³n; el pipeline de fondo hace el resto.
     - Refresco en vivo por `ui.timer` (sustituye el WebSocket original:
       SQLite local + polling de 2 s es suficiente para LAN departamental).
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
+import time
+from datetime import datetime
 
 from nicegui import run, ui
 
@@ -33,31 +57,57 @@ from core.models import GRUPOS_BANDEJA, MetodoExtraccion, OrigenIngesta, meta_es
 from core.pipeline import DocumentoDuplicado
 from ui.layout import (
     REVISOR_POR_DEFECTO,
+    aplicar_tema,
     encabezado,
     estilo_badge,
     obtener_config,
     obtener_pipeline,
-    panel_kpis,
-    aplicar_tema,
+    panel_kpis_filtro,
+    tiempo_absoluto,
     tiempo_relativo,
 )
 
 logger = logging.getLogger("oficialia.ui.dashboard")
 
-#: Refresco de la bandeja (ms) â€” reemplaza los eventos WebSocket.
+#: Refresco de la bandeja (ms) — reemplaza los eventos WebSocket.
 INTERVALO_REFRESCO_S = 2.0
 
-#: Columnas de la tabla (etiquetas del original + mÃ©todo de extracciÃ³n).
+# CSS global de la bandeja (una sola vez, al importar el módulo):
+#   - Filas de la tabla con affordance de "clicable" (cursor + hover), ya
+#     que abren la revisión HITL pero no tenían ninguna señal visual de serlo.
+#   - Se oculta el subtítulo de tamaño/porcentaje ("0.0B / 0.00%") que Quasar
+#     dibuja por defecto en la cabecera del uploader incluso sin archivos en
+#     cola: mezclaba el CTA de carga con un indicador de transferencia vacío.
+# OJO: `shared=True` es obligatorio aquí — este módulo se importa una sola
+# vez al arrancar (main.py, antes de que exista ningún cliente conectado),
+# así que sin `shared=True` add_head_html intenta escribir sobre
+# `context.client` (no hay ninguno todavía) y el <style> nunca llega al
+# <head> real de ninguna página (verificado en navegador: el bug era
+# silencioso, sin excepción, el uploader seguía mostrando "0.0B / 0.00%").
+ui.add_head_html(
+    """
+    <style>
+      .tabla-bandeja tbody tr { cursor: pointer; transition: background-color .12s ease-out; }
+      .tabla-bandeja tbody tr:hover { background-color: #f8fafc; }
+      .upload-limpio .q-uploader__subtitle { display: none; }
+    </style>
+    """,
+    shared=True,
+)
+
+#: Columnas de la tabla. "Estado" incluye el calificador de método de
+#: extracción (ver `_fila_de_tabla`); ya no hay una columna "Extracción"
+#: aparte, que dejaba un hueco vacío en la mayoría de las filas.
 COLUMNAS = [
     {"name": "archivo", "label": "Archivo original", "field": "archivo", "align": "left", "sortable": True},
     {"name": "oficio", "label": "Oficio", "field": "oficio", "align": "left", "sortable": True},
+    {"name": "remitente", "label": "Remitente", "field": "remitente", "align": "left", "sortable": True},
     {"name": "estado", "label": "Estado", "field": "estado", "align": "left"},
-    {"name": "metodo", "label": "ExtracciÃ³n", "field": "metodo", "align": "left"},
-    {"name": "paginas", "label": "PÃ¡gs.", "field": "paginas", "align": "right", "sortable": True},
+    {"name": "paginas", "label": "Págs.", "field": "paginas", "align": "right", "sortable": True},
     {"name": "ingreso", "label": "Ingreso", "field": "ingreso", "align": "left", "sortable": True},
 ]
 
-#: Mapa estado â†’ color de badge de Quasar (paleta del estadoMeta original).
+#: Mapa estado → color de badge de Quasar (paleta del estadoMeta original).
 COLORES_BADGE = {
     "INGESTADO": "grey-3",
     "EN_PREPROCESO": "info",
@@ -69,32 +119,34 @@ COLORES_BADGE = {
     "DESCARTADO": "grey-6",
 }
 
-#: Etiqueta + color del método de extracción (columna "Extracción"). Sin
-#: mencionar el proveedor de IA: solo importa si el dato quedó listo para
-#: confirmar tal cual o si requiere revisión campo por campo.
-METODO_ETIQUETA = {
-    MetodoExtraccion.IA.value: ("Automático", "grey-7"),
-    MetodoExtraccion.HEURISTICA_FALLBACK.value: ("Requiere revisión", "orange-8"),
-    MetodoExtraccion.HITL.value: ("Manual", "grey-7"),
+#: Etiqueta legible del método de extracción, solo para la exportación CSV
+#: (en la tabla se resume como calificador del badge de estado, ver abajo).
+_METODO_ETIQUETA_CSV = {
+    MetodoExtraccion.IA.value: "Automático (IA)",
+    MetodoExtraccion.HEURISTICA_FALLBACK.value: "Heurística — revisión manual",
+    MetodoExtraccion.HITL.value: "Manual",
 }
 
 
 def _fila_de_tabla(documento) -> dict:
     """Convierte un DocumentoRegistro en fila para ui.table."""
     info = meta_estado(documento.estado)
-    metodo_etiqueta, metodo_color = METODO_ETIQUETA.get(
-        documento.extraccion_metodo.value, (documento.extraccion_metodo.value, "grey-7")
-    )
+    fuente = documento.metadatos_extraidos or documento.metadatos_validados
+    es_heuristico = documento.extraccion_metodo == MetodoExtraccion.HEURISTICA_FALLBACK
     return {
         "id": documento.id,
         "archivo": documento.nombre_archivo_original,
-        "oficio": documento.numero_oficio or "â€”",
+        "oficio": documento.numero_oficio or "—",
+        "remitente": (fuente.remitente_nombre if fuente else "") or "—",
         "estado": info.etiqueta,
         "estado_style": estilo_badge(COLORES_BADGE.get(documento.estado.value, "grey-6")),
-        "metodo": metodo_etiqueta,
-        "metodo_style": estilo_badge(metodo_color),
+        # Calificador secundario del badge de estado (no un segundo badge
+        # aparte): evita la ambigüedad de dos etiquetas de color casi
+        # idéntico ("Por revisar" / "Requiere revisión") sin relación clara.
+        "estado_calificador": "Revisión manual campo por campo" if es_heuristico else "",
         "paginas": documento.preproceso.num_paginas if documento.preproceso else None,
         "ingreso": tiempo_relativo(documento.fecha_ingesta),
+        "ingreso_abs": tiempo_absoluto(documento.fecha_ingesta),
         "_orden": documento.fecha_ingesta,
     }
 
@@ -104,14 +156,24 @@ def pagina_bandeja() -> None:
     """Bandeja de entrada + carga manual."""
     aplicar_tema()
     revisor: dict = {"valor": ""}
+    config = obtener_config()
     # fecha_desde/fecha_hasta ya deben existir aquí: _calcular_filas() (más
     # abajo) los lee antes de que los ui.input del rango de fechas alcancen
     # a poblarlos vía bind_value_to, y un KeyError en esa primera pasada
     # dejaba la tabla en blanco hasta el primer _refrescar() (detectado al
     # verificar esta pantalla en navegador).
-    estado_ui: dict = {"grupo": "pendientes", "busqueda": "", "fecha_desde": "", "fecha_hasta": ""}
+    estado_ui: dict = {
+        "grupo": "pendientes", "busqueda": "", "fecha_desde": "", "fecha_hasta": "",
+        "ultima_actualizacion": None,
+        # Preexistente a esta revisión: si "seleccion" no existe todavía en
+        # el diccionario, bind_visibility_from no logra leerla en su primer
+        # ciclo y la barra de acciones en lote queda VISIBLE por defecto sin
+        # nada seleccionado (verificado en navegador). Se inicializa vacía
+        # para que el binding siempre tenga un valor válido que leer.
+        "seleccion": [],
+    }
     # Evita enviar actualizaciones WebSocket de la tabla/KPIs cuando SQLite
-    # no ha cambiado; el timer sigue siendo barato y no recarga la pÃ¡gina.
+    # no ha cambiado; el timer sigue siendo barato y no recarga la página.
     refresco_visto: dict = {"filas": None, "kpis": None}
 
     # El encabezado es un layout de primer nivel (fuera del contenedor).
@@ -131,83 +193,84 @@ def pagina_bandeja() -> None:
         return [_fila_de_tabla(doc) for doc in documentos]
 
     # Filas iniciales calculadas ANTES de construir la tabla: con
-    # selection="multiple", crear el ui.table con rows=[] y poblarlo reciÃ©n
-    # despuÃ©s (tabla.rows = [â€¦]; tabla.update()) deja el checkbox "seleccionar
-    # todo" de Quasar en un estado intermedio inconsistente (arranca vacÃ­o,
+    # selection="multiple", crear el ui.table con rows=[] y poblarlo recién
+    # después (tabla.rows = […]; tabla.update()) deja el checkbox "seleccionar
+    # todo" de Quasar en un estado intermedio inconsistente (arranca vacío,
     # luego se llena) que dispara un TypeError interno de Quasar en el
     # navegador (verificado: no rompe la funcionalidad, pero es evitable).
-    # Pasar las filas reales desde el constructor evita esa transiciÃ³n.
+    # Pasar las filas reales desde el constructor evita esa transición.
     try:
         filas_iniciales = _calcular_filas()
-    except Exception:  # noqa: BLE001 â€” igual que _refrescar(): la UI nunca debe romperse
+    except Exception:  # noqa: BLE001 — igual que _refrescar(): la UI nunca debe romperse
         logger.exception("Error calculando las filas iniciales de la bandeja")
         filas_iniciales = []
 
     with ui.column().classes("w-full max-w-6xl mx-auto q-pa-md gap-4 no-wrap"):
 
-        # ---------------- KPIs ----------------
-        kpis = panel_kpis()
+        # ---------------- KPIs = único selector de filtro ----------------
+        def _cambiar_grupo(nuevo_grupo: str) -> None:
+            estado_ui.update(grupo=nuevo_grupo)
+            repintar_kpis(estado_ui["grupo"])
+            _limpiar_seleccion()
+            _refrescar()
 
-        # ---------------- Filtros + buscador ----------------
-        chips: list[tuple[ui.button, object]] = []
+        kpis_valores, repintar_kpis = panel_kpis_filtro(estado_ui["grupo"], _cambiar_grupo)
 
-        _CHIP_ACTIVO = "bg-white text-slate-800 shadow-sm"
-        _CHIP_INACTIVO = "bg-transparent text-slate-500 hover:text-slate-700"
-
-        def _repintar_chips() -> None:
-            """Recolorea los chips según el grupo activo (estilo control segmentado)."""
-            for chip, grupo in chips:
-                if grupo.id == estado_ui["grupo"]:
-                    chip.classes(_CHIP_ACTIVO, remove=_CHIP_INACTIVO)
-                else:
-                    chip.classes(_CHIP_INACTIVO, remove=_CHIP_ACTIVO)
-
+        # ---------------- Barra de herramientas unificada ----------------
+        # Buscador + rango de fechas + estado de sincronización + exportar +
+        # CTA de carga, todos en una sola fila (antes dispersos en 3 líneas
+        # distintas: pestañas+buscador, fechas en línea aparte, carga al pie
+        # de la página).
         with ui.row().classes("w-full items-center justify-between gap-3 no-wrap flex-wrap"):
-            with ui.row().classes("gap-1 p-1 bg-slate-100 rounded-lg flex-wrap"):
-                for grupo in GRUPOS_BANDEJA:
-                    chip = ui.button(grupo.etiqueta).classes(
-                        "rounded-md px-3 py-1 text-xs font-medium no-wrap shadow-none "
-                        "transition-colors"
-                    ).props('no-caps dense flat padding="4px 10px"')
-                    chip.on(
-                        "click",
-                        lambda _=None, g=grupo: (
-                            estado_ui.update(grupo=g.id),
-                            _repintar_chips(),
-                            _limpiar_seleccion(),
-                            _refrescar(),
-                        ),
+            with ui.row().classes("items-center gap-2 flex-wrap"):
+                # OJO: se escribe en estado_ui DIRECTO desde el evento
+                # (e.value), no solo vía bind_value_to — bind_value_to
+                # propaga por el bucle de refresco periódico de NiceGUI (no
+                # sincrónico), así que _refrescar() podía correr con el
+                # valor previo todavía en el diccionario si dependía solo
+                # del binding. bind_value_to se deja igual para el resto de
+                # la UI reactiva (ej. visibilidad de "Limpiar rango"), donde
+                # la eventual consistencia no importa.
+                # w-[380px] fijo en vez de flex-grow: la fila contenedora no
+                # es w-full, así que flex-grow no tenía espacio disponible
+                # para crecer y el placeholder completo quedaba recortado
+                # visualmente (verificado en navegador).
+                ui.input(placeholder="Buscar por archivo, folio, remitente o asunto…").classes(
+                    "w-[380px]"
+                ).props('dense outlined color=primary clearable debounce="300"').bind_value_to(
+                    estado_ui, "busqueda"
+                ).on_value_change(lambda e: (estado_ui.update(busqueda=e.value or ""), _refrescar()))
+
+                ui.label("Ingresados entre").classes("text-xs text-slate-500 no-wrap")
+                ui.input().props("dense outlined color=primary type=date").classes("w-36").bind_value_to(
+                    estado_ui, "fecha_desde"
+                ).on_value_change(lambda e: (estado_ui.update(fecha_desde=e.value or ""), _refrescar()))
+                ui.label("y").classes("text-xs text-slate-500")
+                ui.input().props("dense outlined color=primary type=date").classes("w-36").bind_value_to(
+                    estado_ui, "fecha_hasta"
+                ).on_value_change(lambda e: (estado_ui.update(fecha_hasta=e.value or ""), _refrescar()))
+                ui.button("Limpiar rango", icon="close").props("flat dense no-caps color=grey").on_click(
+                    lambda: (estado_ui.update(fecha_desde="", fecha_hasta=""), _refrescar())
+                ).bind_visibility_from(
+                    estado_ui, "fecha_desde", backward=lambda v: bool(v) or bool(estado_ui.get("fecha_hasta"))
+                )
+
+            with ui.row().classes("items-center gap-3 no-wrap"):
+                with ui.row().classes("items-center gap-0.5 no-wrap"):
+                    etiqueta_actualizado = ui.label("Actualizando…").classes(
+                        "text-[11px] text-slate-400 no-wrap"
                     )
-                    chips.append((chip, grupo))
-
-            # OJO: se escribe en estado_ui DIRECTO desde el evento (e.value),
-            # no solo vÃ­a bind_value_to â€” bind_value_to propaga por el bucle
-            # de refresco periÃ³dico de NiceGUI (no sincrÃ³nico), asÃ­ que
-            # _refrescar() podÃ­a correr con el valor previo todavÃ­a en el
-            # diccionario si dependÃ­a solo del binding. bind_value_to se deja
-            # igual para el resto de la UI reactiva (ej. visibilidad de
-            # "Limpiar rango"), donde la eventual consistencia no importa.
-            ui.input(placeholder="Buscar por archivo, folio, remitente o asuntoâ€¦").classes(
-                "w-72"
-            ).props('dense outlined color=primary clearable debounce="300"').bind_value_to(
-                estado_ui, "busqueda"
-            ).on_value_change(lambda e: (estado_ui.update(busqueda=e.value or ""), _refrescar()))
-
-        # ---------------- Rango de fechas de ingesta ----------------
-        with ui.row().classes("w-full items-center gap-2 no-wrap"):
-            ui.label("Ingresados entre").classes("text-xs text-slate-500")
-            ui.input().props("dense outlined color=primary type=date").classes("w-40").bind_value_to(
-                estado_ui, "fecha_desde"
-            ).on_value_change(lambda e: (estado_ui.update(fecha_desde=e.value or ""), _refrescar()))
-            ui.label("y").classes("text-xs text-slate-500")
-            ui.input().props("dense outlined color=primary type=date").classes("w-40").bind_value_to(
-                estado_ui, "fecha_hasta"
-            ).on_value_change(lambda e: (estado_ui.update(fecha_hasta=e.value or ""), _refrescar()))
-            ui.button("Limpiar rango", icon="close").props("flat dense no-caps color=grey").on_click(
-                lambda: (estado_ui.update(fecha_desde="", fecha_hasta=""), _refrescar())
-            ).bind_visibility_from(
-                estado_ui, "fecha_desde", backward=lambda v: bool(v) or bool(estado_ui.get("fecha_hasta"))
-            )
+                    ui.button(icon="refresh").props("flat dense round color=grey size=sm").on_click(
+                        lambda: _refrescar()
+                    ).tooltip("Actualizar ahora")
+                ui.button("Exportar CSV", icon="download").props(
+                    "flat dense no-caps color=grey"
+                ).on_click(lambda: _exportar_csv())
+                ui.button("Subir PDFs", icon="upload_file").props(
+                    "color=primary no-caps unelevated"
+                ).on_click(lambda: dialogo_carga.open()).tooltip(
+                    f"Máx. {config.max_upload_bytes // (1024 * 1024)} MB por archivo · solo PDF"
+                )
 
         # ---------------- Barra de acciones en lote ----------------
         with ui.row().classes("w-full items-center gap-2 no-wrap") as barra_lote:
@@ -217,7 +280,7 @@ def pagina_bandeja() -> None:
             ui.button("Confirmar seleccionados", icon="playlist_add_check").props(
                 "color=primary no-caps dense"
             ).on_click(lambda: _confirmar_lote())
-            ui.button("Quitar selecciÃ³n", icon="close").props("flat dense no-caps color=grey").on_click(
+            ui.button("Quitar selección", icon="close").props("flat dense no-caps color=grey").on_click(
                 lambda: _limpiar_seleccion()
             )
         barra_lote.bind_visibility_from(
@@ -227,42 +290,75 @@ def pagina_bandeja() -> None:
         # ---------------- Tabla de documentos ----------------
         # OJO: `pagination` va como kwarg del constructor (Table lo envuelve en
         # {'rowsPerPage': N}, el objeto que espera QTable), NUNCA como texto en
-        # .props("pagination=25") â€” un valor plano ahÃ­, combinado con
-        # rows-per-page-options, deja el objeto de paginaciÃ³n interno de Quasar
-        # invÃ¡lido y la tabla renderiza 0 filas pese a tener datos (bug real,
-        # verificado en navegador: nunca antes se habÃ­a probado esta pantalla
+        # .props("pagination=25") — un valor plano ahí, combinado con
+        # rows-per-page-options, deja el objeto de paginación interno de Quasar
+        # inválido y la tabla renderiza 0 filas pese a tener datos (bug real,
+        # verificado en navegador: nunca antes se había probado esta pantalla
         # fuera de un curl/HTTP plano).
-        # `on_select` se conecta DESPUÃ‰S de construir la tabla, no como kwarg
-        # del constructor: pasarlo ahÃ­ lo registra antes de que el componente
+        # `on_select` se conecta DESPUÉS de construir la tabla, no como kwarg
+        # del constructor: pasarlo ahí lo registra antes de que el componente
         # QTable de Quasar termine de montarse en el cliente y dispara un
         # TypeError interno de Quasar en cada carga (verificado en navegador;
-        # no rompÃ­a la selecciÃ³n en sÃ­, pero es evitable).
+        # no rompía la selección en sí, pero es evitable).
         tabla = ui.table(
             columns=COLUMNAS, rows=filas_iniciales, row_key="id", selection="multiple", pagination=25,
-        ).classes("w-full rounded-xl overflow-hidden").props(
+        ).classes("w-full rounded-xl overflow-hidden tabla-bandeja").props(
             "flat bordered dense no-data='Sin documentos en esta vista' "
             "rows-per-page-options='[25, 50, 100]' binary-state-sort"
         )
         # Badges "soft pill" (fondo claro + texto del mismo tono) en vez del
         # q-badge sólido por defecto: mismo lenguaje visual en toda la app
-        # (ver ui.layout.estilo_badge, que calcula estado_style/metodo_style).
-        # Se mantiene la misma estructura de slot (sin envolver en <q-td>,
-        # ver nota de "on_select"/"pagination" arriba: esta pantalla ya se
-        # verificó en navegador con slots "planos" como estos).
+        # (ver ui.layout.estilo_badge, que calcula estado_style).
+        #
+        # OJO — bug real encontrado al verificar esta pantalla en navegador
+        # con datos (no solo con la tabla vacía): un slot "body-cell-X" cuyo
+        # contenido NO está envuelto en <q-td> no genera una celda de tabla
+        # real, sino un <div>/<span> suelto como hijo directo de <tr>. Como
+        # Vue inserta esos nodos vía DOM API (no vía el parser HTML), el
+        # navegador NO hace foster-parenting: los agrupa en UNA sola celda
+        # anónima por cada RACHA de hijos sin <td> consecutivos. Con dos o
+        # más columnas personalizadas seguidas (como pasaba antes con
+        # "estado"+"metodo"), su contenido termina apilado en una sola
+        # columna visual — probablemente la causa real de que el badge de
+        # estado y el de método parecieran "dos etiquetas contiguas
+        # ambiguas" en la captura original de la auditoría. Cada slot debe
+        # envolver su contenido en <q-td :props="props">, como documenta
+        # Quasar para body-cell-*.
         tabla.add_slot(
             "body-cell-estado",
-            '<span class="rounded-full px-2.5 py-0.5 text-[11px] font-medium" '
-            ':style="props.row.estado_style">{{ props.row.estado }}</span>',
-        )
-        tabla.add_slot(
-            "body-cell-metodo",
-            '<span class="rounded-full px-2.5 py-0.5 text-[11px] font-medium" '
-            ':style="props.row.metodo_style">{{ props.row.metodo }}</span>',
+            '<q-td key="estado" :props="props">'
+            '<div class="flex flex-col gap-0.5 py-1">'
+            '<span class="rounded-full px-2.5 py-0.5 text-[11px] font-medium w-fit" '
+            ':style="props.row.estado_style">{{ props.row.estado }}</span>'
+            '<span v-if="props.row.estado_calificador" '
+            'class="text-[10px] font-medium text-orange-700 flex items-center gap-1">'
+            '<span aria-hidden="true">⚠</span>{{ props.row.estado_calificador }}</span>'
+            "</div></q-td>",
         )
         tabla.add_slot(
             "body-cell-archivo",
-            '<div class="text-xs text-slate-700 ellipsis" style="max-width:340px" :title="props.row.archivo">'
-            "{{ props.row.archivo }}</div>",
+            '<q-td key="archivo" :props="props">'
+            '<div class="text-xs text-slate-700 ellipsis" style="max-width:280px" :title="props.row.archivo">'
+            "{{ props.row.archivo }}</div></q-td>",
+        )
+        tabla.add_slot(
+            "body-cell-remitente",
+            '<q-td key="remitente" :props="props">'
+            '<div class="text-xs text-slate-600 ellipsis" style="max-width:200px" :title="props.row.remitente">'
+            "{{ props.row.remitente }}</div></q-td>",
+        )
+        tabla.add_slot(
+            "body-cell-paginas",
+            '<q-td key="paginas" :props="props">'
+            "<span class='text-xs text-slate-600'>"
+            "{{ props.row.paginas === null || props.row.paginas === undefined ? '—' : props.row.paginas }}"
+            "</span></q-td>",
+        )
+        tabla.add_slot(
+            "body-cell-ingreso",
+            '<q-td key="ingreso" :props="props">'
+            '<span class="text-xs text-slate-500" :title="props.row.ingreso_abs">{{ props.row.ingreso }}</span>'
+            "</q-td>",
         )
         tabla.on(
             "rowClick",
@@ -272,31 +368,52 @@ def pagina_bandeja() -> None:
         )
         tabla.on_select(lambda e: estado_ui.update(seleccion=[fila["id"] for fila in tabla.selected]))
 
-        # ---------------- Dropzone de carga manual ----------------
-        with ui.card().classes(
-            "w-full bg-white shadow-none rounded-xl border border-dashed border-slate-300"
-        ):
-            with ui.row().classes("items-center justify-between no-wrap gap-4 w-full"):
-                with ui.row().classes("items-center gap-3 no-wrap"):
-                    ui.icon("upload_file", size="22px").classes("text-slate-400")
-                    with ui.column().classes("gap-0"):
-                        ui.label("Carga manual de oficios (PDF)").classes(
-                            "text-sm font-semibold text-slate-700"
-                        )
-                        ui.label(
-                            "Arrastre o seleccione archivos; el pipeline los procesará automáticamente."
-                        ).classes("text-xs text-slate-400")
-                ui.upload(
-                    label="Subir PDFs",
-                    auto_upload=True,
-                    multiple=True,
-                    on_upload=lambda evento: _manejar_carga(evento),
-                ).props('color=primary flat accept=".pdf,application/pdf"')
+        # ---------------- Región viva para lectores de pantalla ----------------
+        # Anuncia el tamaño de la vista actual cada vez que cambian las filas
+        # (pipeline automatizado corriendo en segundo plano sin recarga de
+        # página: sin esto, un lector de pantalla no se entera de que algo
+        # cambió).
+        region_anuncio = ui.label("").classes("sr-only").props("role=status aria-live=polite")
+
+        # ---------------- Diálogo de carga manual ----------------
+        # Disparado desde el CTA "Subir PDFs" de la barra de herramientas
+        # (antes: franja al pie de la página, fuera del viewport en bandejas
+        # largas). `.upload-limpio` oculta el subtítulo "0.0B / 0.00%" que
+        # Quasar dibuja por defecto (ver <style> al importar el módulo).
+        with ui.dialog() as dialogo_carga, ui.card().classes("w-full max-w-md gap-3 q-pa-md rounded-xl"):
+            with ui.row().classes("items-center gap-2 no-wrap"):
+                ui.icon("upload_file", size="20px").classes("text-primary")
+                ui.label("Carga manual de oficios (PDF)").classes("text-sm font-semibold text-slate-700")
+            ui.label(
+                f"Máx. {config.max_upload_bytes // (1024 * 1024)} MB por archivo · solo PDF "
+                "(escaneado o vectorial) · puede seleccionar o arrastrar varios documentos a la vez."
+            ).classes("text-xs text-slate-400")
+            ui.upload(
+                label="Arrastre archivos aquí o haga clic para elegir",
+                auto_upload=True,
+                multiple=True,
+                on_upload=lambda evento: _manejar_carga(evento),
+            ).props('color=primary flat bordered accept=".pdf,application/pdf"').classes(
+                "w-full upload-limpio"
+            )
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Cerrar", icon="close").props("flat no-caps color=grey").on_click(dialogo_carga.close)
 
     # ------------------------------------------------------------------
     # Refresco en vivo (_grupo_actual/_calcular_filas ya definidas arriba,
     # reutilizadas para las filas iniciales de la tabla)
     # ------------------------------------------------------------------
+    def _texto_actualizado() -> str:
+        ultimo = estado_ui.get("ultima_actualizacion")
+        if not ultimo:
+            return "Actualizando…"
+        segundos = int(time.time() - ultimo)
+        if segundos < 5:
+            return "Actualizado justo ahora"
+        if segundos < 60:
+            return f"Actualizado hace {segundos} s"
+        return f"Actualizado hace {segundos // 60} min"
+
     def _refrescar() -> None:
         try:
             pipeline = obtener_pipeline()
@@ -304,23 +421,30 @@ def pagina_bandeja() -> None:
             documentos = pipeline.repo.listar(
                 estados=list(grupo.estados) if grupo.estados else None,
                 texto_busqueda=estado_ui["busqueda"],
+                fecha_desde=estado_ui.get("fecha_desde") or None,
+                fecha_hasta=estado_ui.get("fecha_hasta") or None,
             )
             filas = [_fila_de_tabla(doc) for doc in documentos]
             firma_filas = tuple(
-                (fila["id"], fila["estado"], fila["oficio"], fila["paginas"], fila["_orden"])
+                (fila["id"], fila["estado"], fila["estado_calificador"], fila["oficio"],
+                 fila["remitente"], fila["paginas"], fila["_orden"])
                 for fila in filas
             )
             if firma_filas != refresco_visto["filas"]:
                 tabla.rows = filas
                 tabla.update()
                 refresco_visto["filas"] = firma_filas
+                region_anuncio.set_text(f"{len(filas)} documento(s) en la vista {grupo.etiqueta}.")
 
             valores_kpi = obtener_pipeline().repo.contadores_kpi()
             if valores_kpi != refresco_visto["kpis"]:
-                for clave, etiqueta in kpis.items():
+                for clave, etiqueta in kpis_valores.items():
                     etiqueta.set_text(str(valores_kpi.get(clave, 0)))
                 refresco_visto["kpis"] = valores_kpi
-        except Exception:  # noqa: BLE001 â€” la UI nunca debe romperse por un refresh
+
+            estado_ui["ultima_actualizacion"] = time.time()
+            etiqueta_actualizado.set_text(_texto_actualizado())
+        except Exception:  # noqa: BLE001 — la UI nunca debe romperse por un refresh
             logger.exception("Error refrescando la bandeja")
 
     def _limpiar_seleccion() -> None:
@@ -337,7 +461,7 @@ def pagina_bandeja() -> None:
         try:
             resultado = await run.io_bound(pipeline.confirmar_lote, ids, nombre_revisor)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Fallo la confirmaciÃ³n en lote")
+            logger.exception("Fallo la confirmación en lote")
             ui.notify(f"No se pudo confirmar el lote: {exc}", type="negative", position="top")
             return
 
@@ -347,9 +471,9 @@ def pagina_bandeja() -> None:
                 type="positive", position="top",
             )
         if resultado.omitidos:
-            detalle = "; ".join(f"{doc_id[:8]}â€¦: {motivo}" for doc_id, motivo in resultado.omitidos[:5])
+            detalle = "; ".join(f"{doc_id[:8]}…: {motivo}" for doc_id, motivo in resultado.omitidos[:5])
             if len(resultado.omitidos) > 5:
-                detalle += f" (+{len(resultado.omitidos) - 5} mÃ¡s)"
+                detalle += f" (+{len(resultado.omitidos) - 5} más)"
             ui.notify(
                 f"{len(resultado.omitidos)} documento(s) omitido(s): {detalle}",
                 type="warning", position="top", multi_line=True, timeout=8000,
@@ -360,7 +484,6 @@ def pagina_bandeja() -> None:
     def _manejar_carga(evento) -> None:
         """Canal WEB_DRAG_DROP: valida y encola la ingesta en segundo plano."""
         pipeline = obtener_pipeline()
-        config = obtener_config()
 
         nombre = evento.name or "documento.pdf"
         contenido = evento.content.read()
@@ -370,33 +493,72 @@ def pagina_bandeja() -> None:
             return
         if len(contenido) > config.max_upload_bytes:
             ui.notify(
-                f"'{nombre}' excede el lÃ­mite de {config.max_upload_bytes // (1024 * 1024)} MB.",
+                f"'{nombre}' excede el límite de {config.max_upload_bytes // (1024 * 1024)} MB.",
                 type="negative",
                 position="top",
             )
             return
         if not contenido:
-            ui.notify(f"'{nombre}' llegÃ³ vacÃ­o; se ignora.", type="warning", position="top")
+            ui.notify(f"'{nombre}' llegó vacío; se ignora.", type="warning", position="top")
             return
 
         try:
             pipeline.programar_ingesta(nombre, OrigenIngesta.WEB_DRAG_DROP, contenido)
             ui.notify(
-                f"'{nombre}' recibido: preprocesando y extrayendo metadatosâ€¦",
+                f"'{nombre}' recibido: preprocesando y extrayendo metadatos…",
                 type="positive",
                 position="top",
             )
-            estado_ui["grupo"] = "en_proceso"
-            _repintar_chips()
-            _limpiar_seleccion()
-            _refrescar()
-        except DocumentoDuplicado as exc:  # teÃ³rico: se lanza en el hilo de fondo
+            _cambiar_grupo("en_proceso")
+        except DocumentoDuplicado as exc:  # teórico: se lanza en el hilo de fondo
+            # El pipeline ya deduplica por hash/nombre; aquí solo se informa
+            # el resultado (ver backlog de UI: aún no hay un diálogo de
+            # "reemplazar / versionar / cancelar" para colisiones de nombre).
             ui.notify(f"Documento duplicado: {exc}", type="warning", position="top")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fallo al encolar la carga de %s", nombre)
             ui.notify(f"No se pudo recibir '{nombre}': {exc}", type="negative", position="top")
 
-    _repintar_chips()
-    ui.timer(INTERVALO_REFRESCO_S, _refrescar)
-    _refrescar()
+    def _exportar_csv() -> None:
+        """Exporta a CSV la vista actual (mismo filtro de estado/búsqueda/fechas
+        aplicado en pantalla) — bitácoras de turno y entregas de guardia."""
+        grupo = _grupo_actual()
+        try:
+            documentos = obtener_pipeline().repo.listar(
+                estados=list(grupo.estados) if grupo.estados else None,
+                texto_busqueda=estado_ui["busqueda"],
+                fecha_desde=estado_ui.get("fecha_desde") or None,
+                fecha_hasta=estado_ui.get("fecha_hasta") or None,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Error preparando la exportación CSV")
+            ui.notify("No se pudo preparar la exportación.", type="negative", position="top")
+            return
 
+        buffer = io.StringIO()
+        escritor = csv.writer(buffer)
+        escritor.writerow(
+            ["Archivo", "Oficio", "Remitente", "Estado", "Método de extracción", "Páginas", "Ingreso"]
+        )
+        for documento in documentos:
+            fila = _fila_de_tabla(documento)
+            escritor.writerow([
+                fila["archivo"],
+                fila["oficio"],
+                fila["remitente"],
+                fila["estado"],
+                _METODO_ETIQUETA_CSV.get(documento.extraccion_metodo.value, documento.extraccion_metodo.value),
+                fila["paginas"] if fila["paginas"] is not None else "",
+                fila["ingreso_abs"],
+            ])
+
+        nombre_archivo = f"oficialia_{grupo.id}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        # BOM (utf-8-sig) para que Excel detecte UTF-8 y no vuelva a romper
+        # los acentos — precisamente el bug de codificación que motivó esta
+        # auditoría.
+        ui.download(buffer.getvalue().encode("utf-8-sig"), nombre_archivo)
+        ui.notify(f"Exportando {len(documentos)} documento(s) a CSV…", type="positive", position="top")
+
+    ui.timer(INTERVALO_REFRESCO_S, _refrescar)
+    ui.timer(1.0, lambda: etiqueta_actualizado.set_text(_texto_actualizado()))
+    _refrescar()
