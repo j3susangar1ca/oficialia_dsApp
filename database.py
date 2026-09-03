@@ -28,6 +28,7 @@ from core.models import (
     EstadoSheets,
     InfoPreproceso,
     MetadatosOficio,
+    MetodoExtraccion,
     OrigenIngesta,
     ResultadoRpa,
     ahora_utc_iso,
@@ -66,7 +67,9 @@ CREATE TABLE IF NOT EXISTS documentos (
     fecha_validacion_hitl    TEXT,
     fecha_finalizacion       TEXT,
     updated_at               TEXT NOT NULL,
-    version                  INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1)
+    version                  INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    extraccion_metodo        TEXT NOT NULL DEFAULT 'IA'
+        CHECK (extraccion_metodo IN ('IA', 'HEURISTICA_FALLBACK', 'HITL'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_documentos_numero_oficio ON documentos(numero_oficio);
@@ -74,6 +77,42 @@ CREATE INDEX IF NOT EXISTS idx_documentos_estado        ON documentos(estado);
 CREATE INDEX IF NOT EXISTS idx_documentos_estado_fecha  ON documentos(estado, fecha_ingesta);
 CREATE INDEX IF NOT EXISTS idx_documentos_fecha_ingesta ON documentos(fecha_ingesta);
 """
+
+# ======================================================================
+# Versionado de esquema (PRAGMA user_version) — migraciones incrementales
+# ======================================================================
+#
+# `ESQUEMA_SQL` de arriba crea la tabla desde cero para una BD nueva (todas
+# las columnas de la versión más reciente). `_MIGRACIONES` es la ruta que
+# sigue una BD YA EXISTENTE de una versión anterior: cada entrada agrega lo
+# que le falte a esa versión concreta. Ambos caminos deben converger al
+# mismo esquema final — de lo contrario, actualizar la app en la máquina de
+# un usuario con una BD antigua fallaría en vez de migrar silenciosamente.
+#
+# Índice de la lista = versión ORIGEN (0-based); cada función deja la BD en
+# `version + 1`. Agregar una migración nueva NUNCA debe reescribir una ya
+# publicada (el historial de versiones ya entregadas a clientes es inmutable).
+
+
+def _migracion_0_a_1(conn: sqlite3.Connection) -> None:
+    """
+    v0 → v1: agrega `extraccion_metodo` (IA | HEURISTICA_FALLBACK | HITL),
+    usada por el extractor heurístico de respaldo (core/heuristic_extractor.py)
+    para que la revisión HITL sepa distinguir una extracción de Gemini de
+    una de solo-regex cuando la IA no está disponible.
+    """
+    columnas = {fila["name"] for fila in conn.execute("PRAGMA table_info(documentos)")}
+    if "extraccion_metodo" not in columnas:
+        conn.execute(
+            "ALTER TABLE documentos ADD COLUMN extraccion_metodo TEXT NOT NULL DEFAULT 'IA' "
+            "CHECK (extraccion_metodo IN ('IA', 'HEURISTICA_FALLBACK', 'HITL'))"
+        )
+
+
+#: Migraciones en orden: `_MIGRACIONES[N]` lleva de la versión N a la N+1.
+#: `VERSION_ESQUEMA` (= len(_MIGRACIONES)) es la versión objetivo actual.
+_MIGRACIONES: list = [_migracion_0_a_1]
+VERSION_ESQUEMA: int = len(_MIGRACIONES)
 
 
 class ErrorConcurrencia(Exception):
@@ -108,12 +147,29 @@ class RepositorioDocumentos:
             conn.close()
 
     # ------------------------------------------------------------------
-    # Inicialización del esquema
+    # Inicialización del esquema + migraciones incrementales
     # ------------------------------------------------------------------
     def inicializar(self) -> None:
+        """
+        Crea el esquema si no existe (BD nueva: ya nace en VERSION_ESQUEMA) y
+        aplica las migraciones pendientes si es una BD de una versión
+        anterior (actualización de la app sobre una instalación existente).
+        Idempotente y segura de llamar en cada arranque.
+        """
         with self._conexion() as conn:
             conn.executescript(ESQUEMA_SQL)
-        logger.info("SQLite listo (WAL) en %s", self.config.database_path)
+
+            version_actual = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version_actual < VERSION_ESQUEMA:
+                logger.info(
+                    "Migrando esquema SQLite: v%d → v%d", version_actual, VERSION_ESQUEMA
+                )
+            for version_origen in range(version_actual, VERSION_ESQUEMA):
+                _MIGRACIONES[version_origen](conn)
+                conn.execute(f"PRAGMA user_version = {version_origen + 1}")
+        logger.info(
+            "SQLite listo (WAL, esquema v%d) en %s", VERSION_ESQUEMA, self.config.database_path
+        )
 
     # ------------------------------------------------------------------
     # Mapeo fila ⇄ modelo
@@ -145,6 +201,7 @@ class RepositorioDocumentos:
             fecha_finalizacion=fila["fecha_finalizacion"],
             updated_at=fila["updated_at"],
             version=fila["version"],
+            extraccion_metodo=MetodoExtraccion(fila["extraccion_metodo"]),
         )
 
     # ------------------------------------------------------------------
@@ -229,21 +286,37 @@ class RepositorioDocumentos:
         return registro
 
     def guardar_metadatos_extraidos(
-        self, doc_id: str, metadatos: MetadatosOficio, estado: EstadoDocumento, *, version_esperada: int
+        self,
+        doc_id: str,
+        metadatos: MetadatosOficio,
+        estado: EstadoDocumento,
+        *,
+        version_esperada: int,
+        extraccion_metodo: MetodoExtraccion = MetodoExtraccion.IA,
     ) -> DocumentoRegistro:
-        """Persiste los metadatos inferidos por la IA y el estado resultante."""
+        """
+        Persiste los metadatos extraídos y el estado resultante.
+
+        :param extraccion_metodo: IA (default, Gemini) o HEURISTICA_FALLBACK
+            cuando el extractor de respaldo (core/heuristic_extractor.py)
+            produjo estos metadatos porque la IA no estaba disponible —
+            queda visible en la bandeja/HITL para que el revisor sepa que
+            debe verificar/completar TODOS los campos, no solo confirmar.
+        """
         with self._conexion() as conn:
             cursor = conn.execute(
                 """
                 UPDATE documentos
                    SET metadatos_extraidos = ?, numero_oficio = ?, estado = ?,
-                       error_msg = NULL, updated_at = ?, version = version + 1
+                       extraccion_metodo = ?, error_msg = NULL, updated_at = ?,
+                       version = version + 1
                  WHERE id = ? AND version = ?
                 """,
                 (
                     metadatos.model_dump_json(),
                     metadatos.numero_oficio,
                     estado.value,
+                    extraccion_metodo.value,
                     ahora_utc_iso(),
                     doc_id,
                     version_esperada,
@@ -410,7 +483,7 @@ class RepositorioDocumentos:
 
         with self._conexion() as conn:
             filas = conn.execute(sql, parametros).fetchall()
-        return [self._a_modelo(f) for fila in filas]
+        return [self._a_modelo(fila) for fila in filas]
 
     def contadores_kpi(self) -> dict[str, int]:
         """KPIs de la bandeja: pendientes, en proceso, errores, completados y total."""

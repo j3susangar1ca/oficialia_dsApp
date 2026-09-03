@@ -40,17 +40,20 @@ from typing import Optional
 from config import Configuracion, get_settings
 from core.ai_extractor import ErrorExtraccionIA, ExtractorMetadatos
 from core.file_manager import GestorArchivos
+from core.heuristic_extractor import extraer_heuristico
 from core.models import (
     DocumentoRegistro,
     EstadoDocumento,
     EstadoSheets,
     MetadatosOficio,
+    MetodoExtraccion,
     OrigenIngesta,
     ResultadoRpa,
 )
 from core.pdf_engine import (
     ErrorPdf,
     calcular_sha256,
+    extraer_texto_capa,
     extraer_texto_ocr,
     inspeccionar_y_sanitizar,
     renderizar_paginas,
@@ -166,16 +169,35 @@ class FlujoDocumental:
             except Exception:  # noqa: BLE001 — el OCR auxiliar nunca debe abortar la ingesta
                 logger.warning("OCR auxiliar omitido para %s", registro.id, exc_info=True)
                 textos_ocr = None
-            metadatos = self.extractor.extraer_de_paginas(
-                paginas, anio_contexto=datetime.now().year, textos_ocr=textos_ocr
-            )
+            try:
+                metadatos = self.extractor.extraer_de_paginas(
+                    paginas, anio_contexto=datetime.now().year, textos_ocr=textos_ocr
+                )
+                metodo_extraccion = MetodoExtraccion.IA
+            except ErrorExtraccionIA as exc:
+                # Último recurso antes de rendirse: si la IA no está disponible
+                # (sin API key, cuota agotada, timeout tras reintentos) o su
+                # respuesta violó el contrato, se intenta rescatar al menos
+                # número de oficio y fecha por regex — mejor que perder el
+                # documento en 04_errores. Excepción: un bloqueo de seguridad
+                # del proveedor NO se intenta sortear (ver _extraer_heuristico_respaldo).
+                metadatos = None
+                if exc.codigo != "CONTENIDO_BLOQUEADO_SEGURIDAD":
+                    metadatos = self._extraer_heuristico_respaldo(registro, sanitizado, textos_ocr, exc)
+                if metadatos is None:
+                    raise  # conserva el comportamiento original: DESCARTADO + cuarentena
+                metodo_extraccion = MetodoExtraccion.HEURISTICA_FALLBACK
 
             registro = self.repo.guardar_metadatos_extraidos(
-                registro.id, metadatos, EstadoDocumento.PENDIENTE_REVISION, version_esperada=registro.version
+                registro.id,
+                metadatos,
+                EstadoDocumento.PENDIENTE_REVISION,
+                version_esperada=registro.version,
+                extraccion_metodo=metodo_extraccion,
             )
             logger.info(
-                "Documento %s listo para revisión (oficio %s, %d páginas)",
-                registro.id, metadatos.numero_oficio, info.num_paginas,
+                "Documento %s listo para revisión (oficio %s, %d páginas, método %s)",
+                registro.id, metadatos.numero_oficio, info.num_paginas, metodo_extraccion.value,
             )
             return registro
 
@@ -185,6 +207,34 @@ class FlujoDocumental:
         except Exception as exc:  # noqa: BLE001 — fallo inesperado del pipeline
             logger.exception("Fallo inesperado procesando %s", registro.id)
             return self._aislar_por_error(registro, f"ERROR_INESPERADO :: {exc}")
+
+    def _extraer_heuristico_respaldo(
+        self,
+        registro: DocumentoRegistro,
+        sanitizado: bytes,
+        textos_ocr: Optional[dict[int, str]],
+        causa_original: ErrorExtraccionIA,
+    ) -> Optional[MetadatosOficio]:
+        """
+        Último recurso cuando la IA falla: intenta rescatar número de oficio
+        y fecha por regex (core.heuristic_extractor) sobre la capa de texto
+        embebida del PDF, o el OCR auxiliar si esa capa está vacía (fax /
+        escaneo sin texto). Devuelve None —y el pipeline conserva el
+        comportamiento original (DESCARTADO + cuarentena)— si tampoco hay
+        texto disponible o la propia heurística falla; nunca lanza.
+        """
+        try:
+            texto_capa = extraer_texto_capa(sanitizado, max_paginas=self.config.render_max_paginas)
+            texto_disponible = texto_capa or textos_ocr or {}
+            metadatos = extraer_heuristico(texto_disponible, anio_contexto=datetime.now().year)
+            logger.warning(
+                "Extracción IA falló para %s [%s]: %s — usando heurística de respaldo (oficio=%s, fecha=%s)",
+                registro.id, causa_original.codigo, causa_original, metadatos.numero_oficio, metadatos.fecha_emision,
+            )
+            return metadatos
+        except Exception:  # noqa: BLE001 — la heurística es mejor esfuerzo, nunca reemplaza el flujo original
+            logger.exception("Heurística de respaldo también falló para %s", registro.id)
+            return None
 
     def _aislar_por_error(self, registro: DocumentoRegistro, motivo: str) -> DocumentoRegistro:
         """Fallo de preproceso/extracción: DESCARTADO + cuarentena + trazabilidad."""

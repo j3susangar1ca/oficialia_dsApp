@@ -17,6 +17,10 @@ dist/
 data/*.db
 data/*.db-*
 data/tablero_local.csv
+logs/
+
+# Pruebas
+.pytest_cache/
 
 # Documentos del ciclo de vida físico
 storage/01_entrada/*

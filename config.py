@@ -255,6 +255,7 @@ class Configuracion(BaseSettings):
         """Líneas de diagnóstico que se imprimen al iniciar (transparencia operativa)."""
         lineas = [
             f"Modo           : {'Ejecutable instalado (Windows)' if EMPAQUETADO else 'Fuente (python main.py)'}",
+            f"Logs           : {DATOS_DIR / 'logs' / 'app.log'} (rotativo, 10 MB x 5 respaldos)",
             f"Almacenamiento : {self.storage_root}",
             f"Base de datos  : {self.database_path}",
             f"Extracción IA  : {'Gemini ' + self.gemini_modelo if self.gemini_api_key else 'SIN GEMINI_API_KEY (la extracción fallará y quedará registrado el error)'}",

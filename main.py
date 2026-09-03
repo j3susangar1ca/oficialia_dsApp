@@ -29,16 +29,12 @@ from nicegui import app, ui
 # ----------------------------------------------------------------------
 # 1) Logging y configuración
 # ----------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-logging.getLogger("nicegui").setLevel(logging.WARNING)
-logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+from config import DATOS_DIR, EMPAQUETADO, get_settings  # noqa: E402
+from core.logging_setup import configurar_logging  # noqa: E402
+
+configurar_logging(DATOS_DIR)
 logger = logging.getLogger("oficialia.main")
 
-from config import EMPAQUETADO, get_settings  # noqa: E402
 from core.ai_extractor import ExtractorMetadatos  # noqa: E402
 from core.file_manager import GestorArchivos  # noqa: E402
 from core.models import DocumentoRegistro, EstadoDocumento, ResultadoRpa  # noqa: E402

@@ -18,7 +18,11 @@
    páginas por inferencia).
 3. **Extracción estructurada** con **Gemini 2.5 Flash** (SDK oficial `google-genai`):
    system prompt institucional (protocolo OCR de oficios, 9 secciones), salida JSON forzada y
-   validación estricta con **Pydantic v2** (`MetadatosOficio`, 11 campos).
+   validación estricta con **Pydantic v2** (`MetadatosOficio`, 11 campos). Si la IA no está
+   disponible (sin API key, cuota agotada, timeout de red), un **extractor heurístico de
+   respaldo** (`core/heuristic_extractor.py`, solo regex, sin red) rescata al menos el número
+   de oficio y la fecha del texto plano del PDF, para que el documento llegue de todos modos a
+   `PENDIENTE_REVISION` — marcado como `HEURISTICA_FALLBACK` — en vez de perderse en cuarentena.
 4. **Ciclo de vida persistido en SQLite (WAL)**:
    `INGESTADO → EN_PREPROCESO → EXTRAYENDO → PENDIENTE_REVISION → EJECUTANDO_RPA → COMPLETADO`
    (con `ERROR_RPA` reinteligible y `DESCARTADO` terminal).
@@ -34,6 +38,10 @@
    navegador.
 8. **Sincronización opcional a Google Sheets** (cuenta de servicio) con el layout A:M del tablero
    de control; sin credenciales funciona en **stub local** (`data/tablero_local.csv`).
+9. **Operación diagnosticable**: log rotativo a archivo (`logs/app.log`, 10 MB × 5 respaldos,
+   `core/logging_setup.py`) además de la consola, y esquema SQLite versionado
+   (`PRAGMA user_version` + migraciones incrementales en `database.py`) para que actualizar la
+   app sobre una instalación existente no corrompa ni pierda la base de datos de un cliente.
 
 ---
 
@@ -113,6 +121,8 @@ oficialia_dsa/
 │   ├── ai_extractor.py   # Gemini 2.5 Flash + prompt institucional (verbatim)
 │   ├── file_manager.py   # Gestión de storage y nomenclatura canónica
 │   ├── pipeline.py       # Orquestador (ingesta → HITL → RPA → Sheets)
+│   ├── heuristic_extractor.py # Extractor de respaldo por regex (sin IA)
+│   ├── logging_setup.py  # Logging a consola + archivo rotativo
 │   ├── watcher.py        # Vigilancia en tiempo real (watchdog)
 │   └── sheets_sync.py    # Google Sheets vía Service Account (+ stub local)
 ├── rpa/
@@ -121,10 +131,13 @@ oficialia_dsa/
 │   ├── layout.py         # Encabezado, KPIs y contexto compartido
 │   ├── views_dashboard.py# Bandeja: filtros, buscador, tabla y dropzone
 │   └── views_hitl.py     # Split-screen: visor PDF + formulario reactivo
+├── tests/                # pytest — ver sección 5.6 (sin red, sin credenciales)
 ├── storage/              # 01_entrada · 02_en_proceso · 03_procesados · 04_errores
 ├── data/                 # oficialia.db (SQLite) y tablero_local.csv (stub)
 ├── main.py               # Punto de entrada único
 ├── requirements.txt      # Dependencias exactas
+├── requirements-dev.txt  # + pytest (desarrollo/pruebas)
+├── pytest.ini
 ├── .env.example          # Plantilla de variables de entorno
 ├── packaging/            # Instalador Windows (ver sección 2)
 │   ├── oficialia.spec    # Bundle PyInstaller (onedir)
@@ -227,6 +240,23 @@ Abrir en el navegador: **http://localhost:8080** (o `APP_PORT` del `.env`).
 - Deje PDFs en `storage/01_entrada/` (el escáner departamental puede apuntar ahí por SMB)
   o súbalos desde la bandeja web.
 - Revise cada documento en `Pendientes` → verifique el formulario → **[Confirmar y Registrar]**.
+
+### 5.6 Ejecutar la suite de pruebas
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+No requiere `GEMINI_API_KEY`, Playwright ni Tesseract: cada prueba usa su propia
+carpeta temporal (BD SQLite + storage aislados, `tests/conftest.py`) y dobles
+(fakes) explícitos donde haría falta un servicio externo — nunca golpea Gemini,
+la Intranet real ni internet. Cobertura actual: contrato `MetadatosOficio`
+(normalización, centinela `S/N`, nomenclatura canónica), repositorio SQLite
+(CRUD, concurrencia optimista, **migraciones de esquema**, el buscador de la
+bandeja), preprocesamiento PyMuPDF, el extractor heurístico de respaldo
+(sección 1) y la integración completa del pipeline de ingesta con un extractor
+de IA simulado. `pytest.ini` fija `testpaths = tests`.
 
 ---
 

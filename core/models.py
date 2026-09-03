@@ -53,6 +53,23 @@ class Procedencia(str, Enum):
     AJENA = "Ajena"
 
 
+class MetodoExtraccion(str, Enum):
+    """
+    Origen de los metadatos extraídos — visible en la bandeja/HITL para que
+    el revisor sepa cuánto confiar en lo precargado:
+
+        IA                  → Gemini 2.5 Flash (caso normal).
+        HEURISTICA_FALLBACK → regex sobre texto plano/OCR (core/heuristic_
+                               extractor.py), usado solo cuando la IA no
+                               está disponible o falla; requiere que el
+                               revisor complete/verifique todos los campos.
+        HITL                → el revisor corrigió manualmente en pantalla.
+    """
+    IA = "IA"
+    HEURISTICA_FALLBACK = "HEURISTICA_FALLBACK"
+    HITL = "HITL"
+
+
 class EstadoDocumento(str, Enum):
     """
     Máquina de estados del ciclo de vida (versión consolidada):
@@ -145,6 +162,11 @@ class MetadatosOficio(BaseModel):
         valor = valor.strip()
         if not valor:
             raise ValueError("El número de oficio es obligatorio (use 'S/N' si carece de folio)")
+        if valor.upper() == "S/N":
+            # Centinela documentado (contrato de la IA y de nombre_archivo_canonico):
+            # se preserva tal cual — de lo contrario la sustitución de caracteres
+            # reservados de abajo (para folios reales con '/') lo corrompería a "S-N".
+            return "S/N"
         return CARACTERES_RESERVADOS_RE.sub("-", valor)
 
     @field_validator("fecha_emision")
@@ -264,6 +286,8 @@ class DocumentoRegistro(BaseModel):
     fecha_finalizacion: Optional[str] = None
     updated_at: str = Field(default_factory=ahora_utc_iso)
     version: int = 1
+    #: Cómo se obtuvieron metadatos_extraidos (ver MetodoExtraccion).
+    extraccion_metodo: MetodoExtraccion = MetodoExtraccion.IA
 
 
 # ======================================================================
@@ -316,10 +340,15 @@ def nombre_archivo_canonico(metadatos: MetadatosOficio) -> str:
         YYYY-MM-DD__[FOLIO]__[REMITENTE].pdf
 
     Reglas heredadas del orquestador original:
-        - folio: ya viene sanitizado por MetadatosOficio (reservados → '-').
+        - folio: reservados → '-' para uso en nombre de archivo. OJO: el
+          centinela "S/N" se preserva intencionalmente TAL CUAL dentro de
+          MetadatosOficio (contrato de la IA / RPA / UI); es ESTA función,
+          no el modelo, la responsable de sanearlo para el sistema de
+          archivos — nunca asuma que `metadatos.numero_oficio` ya viene
+          libre de '/' u otros caracteres reservados.
         - remitente: primeros 30 caracteres, espacios colapsados a '_'.
     """
-    folio = metadatos.numero_oficio.strip() or "SIN_FOLIO"
+    folio = CARACTERES_RESERVADOS_RE.sub("-", metadatos.numero_oficio.strip()) or "SIN_FOLIO"
     remitente = CARACTERES_RESERVADOS_RE.sub(
         "-", metadatos.remitente_nombre[:30].strip()
     ).replace(" ", "_")
