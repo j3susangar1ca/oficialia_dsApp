@@ -34,6 +34,7 @@ import logging
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -42,6 +43,7 @@ from core.ai_extractor import ErrorExtraccionIA, ExtractorMetadatos
 from core.file_manager import GestorArchivos
 from core.heuristic_extractor import extraer_heuristico
 from core.models import (
+    AccionAuditoria,
     DocumentoRegistro,
     EstadoDocumento,
     EstadoSheets,
@@ -49,6 +51,7 @@ from core.models import (
     MetodoExtraccion,
     OrigenIngesta,
     ResultadoRpa,
+    diferencia_metadatos,
 )
 from core.pdf_engine import (
     ErrorPdf,
@@ -70,6 +73,15 @@ class DocumentoDuplicado(Exception):
         self.existente = existente
         self.sha256 = sha256
         super().__init__(f"Documento duplicado detectado con hash {sha256} (id {existente.id})")
+
+
+@dataclass
+class ResultadoConfirmacionLote:
+    """Resultado de FlujoDocumental.confirmar_lote(): quién pasó y quién no, y por qué."""
+    confirmados: list[DocumentoRegistro] = field(default_factory=list)
+    #: (doc_id, motivo_de_omision) — para que la UI pueda explicarle al
+    #: revisor exactamente por qué un documento no se confirmó en el lote.
+    omitidos: list[tuple[str, str]] = field(default_factory=list)
 
 
 class FlujoDocumental:
@@ -283,6 +295,7 @@ class FlujoDocumental:
         logger.info("Archivo canónico consolidado: %s (sha %s…)", ruta_pdf, sha_final[:12])
 
         # 2) Persistencia de la validación + transición a EJECUTANDO_RPA.
+        campos_modificados = diferencia_metadatos(documento.metadatos_extraidos, metadatos)
         documento = self.repo.guardar_confirmacion_hitl(
             doc_id,
             metadatos=metadatos,
@@ -295,10 +308,62 @@ class FlujoDocumental:
         documento = self.repo.actualizar_estado(
             doc_id, EstadoDocumento.EJECUTANDO_RPA, version_esperada=documento.version
         )
+        self.repo.registrar_auditoria(doc_id, revisor, AccionAuditoria.CONFIRMAR, campos_modificados)
 
         # 3) Pipeline de salida asíncrono (RPA serializado + Sheets no bloqueante).
         self.ejecutor_salida.submit(self._ejecutar_salida, doc_id)
         return documento
+
+    def confirmar_lote(self, doc_ids: list[str], revisor: str) -> "ResultadoConfirmacionLote":
+        """
+        Acción [Confirmar seleccionados] de la bandeja: confirma varios
+        documentos de una sola vez usando TAL CUAL lo que ya extrajo la IA
+        (sin edición individual) — pensado para el caso de alto volumen con
+        extracciones de alta confianza.
+
+        Excluye deliberadamente (nunca los confirma, los reporta como
+        omitidos) cualquier documento que:
+          - no esté en PENDIENTE_REVISION (ya se movió, otra pestaña lo tomó, etc.)
+          - se haya extraído por HEURISTICA_FALLBACK (placeholders sin verificar;
+            requieren edición manual campo por campo, ver core.heuristic_extractor)
+          - no tenga metadatos_extraidos (no debería ocurrir, defensivo)
+
+        Un fallo en un documento individual NO aborta el resto del lote.
+        """
+        confirmados: list[DocumentoRegistro] = []
+        omitidos: list[tuple[str, str]] = []
+
+        for doc_id in doc_ids:
+            documento = self.repo.obtener(doc_id)
+            if documento is None:
+                omitidos.append((doc_id, "Documento no encontrado"))
+                continue
+            if documento.estado != EstadoDocumento.PENDIENTE_REVISION:
+                omitidos.append((doc_id, f"No está en PENDIENTE_REVISION (estado: {documento.estado.value})"))
+                continue
+            if documento.extraccion_metodo == MetodoExtraccion.HEURISTICA_FALLBACK:
+                omitidos.append((doc_id, "Extracción heurística: requiere revisión manual campo por campo"))
+                continue
+            if documento.metadatos_extraidos is None:
+                omitidos.append((doc_id, "Sin metadatos extraídos"))
+                continue
+
+            try:
+                actualizado = self.confirmar_hitl(doc_id, documento.metadatos_extraidos, revisor)
+                # confirmar_hitl ya registró AccionAuditoria.CONFIRMAR con el
+                # diff (vacío, aquí no se edita nada); se anota además que
+                # vino de una confirmación en lote, para el historial del documento.
+                self.repo.registrar_auditoria(doc_id, revisor, AccionAuditoria.CONFIRMAR_LOTE, {})
+                confirmados.append(actualizado)
+            except Exception as exc:  # noqa: BLE001 — un fallo individual no debe abortar el lote
+                logger.exception("Confirmación en lote falló para %s", doc_id)
+                omitidos.append((doc_id, str(exc)))
+
+        logger.info(
+            "Confirmación en lote por %s: %d confirmados, %d omitidos",
+            revisor, len(confirmados), len(omitidos),
+        )
+        return ResultadoConfirmacionLote(confirmados=confirmados, omitidos=omitidos)
 
     def descartar(self, doc_id: str, motivo: str, revisor: str) -> DocumentoRegistro:
         """
@@ -313,7 +378,7 @@ class FlujoDocumental:
 
         motivo_completo = f"DESCARTADO_POR_REVISOR::{revisor} :: {motivo}".strip(" :")
         ruta_error = self.archivos.mover_a_error(documento.ruta_archivo_actual, motivo_completo)
-        return self.repo.actualizar_estado(
+        resultado = self.repo.actualizar_estado(
             doc_id,
             EstadoDocumento.DESCARTADO,
             version_esperada=documento.version,
@@ -321,11 +386,13 @@ class FlujoDocumental:
             error_msg=motivo_completo,
             finalizado=True,
         )
+        self.repo.registrar_auditoria(doc_id, revisor, AccionAuditoria.DESCARTAR, {"motivo": {"anterior": None, "nuevo": motivo}})
+        return resultado
 
     # ------------------------------------------------------------------
     # Flujo 3 — Salida (RPA + Google Sheets) y reintento
     # ------------------------------------------------------------------
-    def reintentar_rpa(self, doc_id: str) -> DocumentoRegistro:
+    def reintentar_rpa(self, doc_id: str, revisor: str = "SISTEMA") -> DocumentoRegistro:
         """Reinyecta en la Intranet un documento en ERROR_RPA (sin reextraer)."""
         documento = self.repo.obtener(doc_id)
         if documento is None:
@@ -336,6 +403,7 @@ class FlujoDocumental:
         documento = self.repo.actualizar_estado(
             doc_id, EstadoDocumento.EJECUTANDO_RPA, version_esperada=documento.version
         )
+        self.repo.registrar_auditoria(doc_id, revisor, AccionAuditoria.REINTENTAR_RPA, {})
         self.ejecutor_salida.submit(self._ejecutar_salida, doc_id)
         return documento
 

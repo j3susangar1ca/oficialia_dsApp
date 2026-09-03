@@ -184,6 +184,8 @@ class Configuracion(BaseSettings):
     rpa_oficialia_cve: str = ""         # CVE de oficialía precargada (combo Webix 'cve')
     rpa_hcg_dependencia_cve: str = ""   # CVE de dependencia cuando procedencia = HCG
     rpa_seccion_cve: str = ""           # CVE de sección (campo opcional 'seccion')
+    rpa_navegador: str = "auto"         # 'auto' (Edge del sistema, respaldo Chromium empaquetado)
+                                         # | 'msedge' | 'chromium' — ver rpa/playwright_rpa.py
 
     # -- Tolerancia a demoras de red / reintentos / sesión (worker Playwright) --
     rpa_selector_timeout_ms: int = 15_000   # Timeout individual por selector/control Webix
@@ -216,6 +218,14 @@ class Configuracion(BaseSettings):
     def _validar_jitter(cls, valor: float) -> float:
         if not 0.0 <= valor <= 1.0:
             raise ValueError("RPA_JITTER_FACTOR debe estar entre 0.0 y 1.0")
+        return valor
+
+    @field_validator("rpa_navegador")
+    @classmethod
+    def _validar_rpa_navegador(cls, valor: str) -> str:
+        valor = valor.strip().lower()
+        if valor not in {"auto", "msedge", "chromium"}:
+            raise ValueError("RPA_NAVEGADOR debe ser 'auto', 'msedge' o 'chromium'")
         return valor
 
     # ------------------------------------------------------------------

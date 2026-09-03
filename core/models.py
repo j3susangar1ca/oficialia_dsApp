@@ -290,6 +290,50 @@ class DocumentoRegistro(BaseModel):
     extraccion_metodo: MetodoExtraccion = MetodoExtraccion.IA
 
 
+class AccionAuditoria(str, Enum):
+    """Acción registrada en `auditoria_hitl` (ver database.py::registrar_auditoria)."""
+    CONFIRMAR = "CONFIRMAR"
+    DESCARTAR = "DESCARTAR"
+    REINTENTAR_RPA = "REINTENTAR_RPA"
+    CONFIRMAR_LOTE = "CONFIRMAR_LOTE"
+
+
+class RegistroAuditoria(BaseModel):
+    """
+    Fila de `auditoria_hitl`: quién hizo qué sobre un documento y cuándo.
+    `campos_modificados` es la diferencia campo a campo entre lo que la IA
+    (o la heurística) extrajo y lo que el revisor confirmó — vacío si
+    confirmó tal cual, sin tocar nada (incluida la confirmación en lote,
+    que por diseño nunca edita metadatos, ver pipeline.confirmar_lote).
+    """
+    id: int
+    documento_id: str
+    revisor_usuario_id: str
+    accion: AccionAuditoria
+    campos_modificados: dict[str, dict[str, Optional[str]]] = Field(default_factory=dict)
+    fecha: str = Field(default_factory=ahora_utc_iso)
+
+
+def diferencia_metadatos(
+    original: Optional[MetadatosOficio], validado: MetadatosOficio
+) -> dict[str, dict[str, Optional[str]]]:
+    """
+    Compara `original` (lo que extrajo la IA/heurística, puede ser None) con
+    `validado` (lo que confirmó el revisor) campo a campo y devuelve solo
+    las diferencias, como `{campo: {"anterior": ..., "nuevo": ...}}` — la
+    base de `campos_modificados` en RegistroAuditoria.
+    """
+    datos_validado = validado.model_dump(mode="json")
+    if original is None:
+        return {campo: {"anterior": None, "nuevo": str(valor)} for campo, valor in datos_validado.items()}
+    datos_original = original.model_dump(mode="json")
+    return {
+        campo: {"anterior": str(datos_original.get(campo)), "nuevo": str(valor)}
+        for campo, valor in datos_validado.items()
+        if datos_original.get(campo) != valor
+    }
+
+
 # ======================================================================
 # 5. METADATOS VISUALES DE ESTADO (badges / etiquetas de la interfaz)
 # ======================================================================
