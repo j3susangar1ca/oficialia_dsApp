@@ -660,7 +660,12 @@ class RpaIntranet:
 
         cve_oficialia = self._resolver_cve_oficialia(marco)
         if not cve_oficialia:
-            raise ErrorRpa("FORMULARIO_WEBIX_TIMEOUT", "No fue posible resolver la oficialía (campo Webix 'cve').")
+            raise ErrorRpa(
+                "FORMULARIO_WEBIX_TIMEOUT",
+                "No fue posible resolver la oficialía (campo Webix 'cve'). Configure "
+                "RPA_OFICIALIA_CVE en el .env con el CVE institucional de la oficialía "
+                "a usar (revise el log anterior para el diagnóstico del combo).",
+            )
 
         # Campos base del formulario op_ningr.fwx (mismo orden que el original).
         self._asignar_webix(marco, "cve", cve_oficialia)
@@ -730,9 +735,33 @@ class RpaIntranet:
             self._asignar_webix_opcional(marco, "dependen", dependencia)
 
     def _resolver_cve_oficialia(self, marco) -> str:
-        """CVE configurada, o la primera opción del combo 'cve'."""
+        """
+        CVE configurada (RPA_OFICIALIA_CVE, recomendado en producción), o —
+        a falta de ella — la primera opción del combo 'cve' del formulario.
+
+        El combo 'cve' está ligado a un `suggest` (ver docs/rpa/webix_dump_
+        for_qwen.json): en varias instalaciones Webix ese tipo de control
+        solo dispara su carga AJAX al ABRIRSE, no al inicializarse el
+        formulario, así que aquí se fuerza un open()/close() inofensivo
+        antes de sondear — sin eso, `getFirstData()` puede seguir vacío
+        pese a que el combo sí tiene opciones disponibles en el servidor.
+        """
         if self.config.rpa_oficialia_cve:
             return self.config.rpa_oficialia_cve
+
+        try:
+            marco.evaluate(
+                "() => {"
+                "  const c = window.webix?.$$('cve');"
+                "  if (c && typeof c.open === 'function') {"
+                "    c.open();"
+                "    if (typeof c.close === 'function') c.close();"
+                "  }"
+                "}"
+            )
+        except Exception:  # noqa: BLE001 — best-effort, nunca bloquea la resolución
+            pass
+
         try:
             self._esperar_con_reintentos(
                 marco,
@@ -741,14 +770,28 @@ class RpaIntranet:
                 "  return !!(c?.getList?.()?.getFirstData?.());"
                 "}",
                 descripcion="combo 'cve' con datos",
-                timeout_ms=5000,
-                reintentos=2,
+                timeout_ms=self.config.rpa_selector_timeout_ms,
+                reintentos=3,
             )
         except ErrorRpa:
-            pass  # Se intenta leer de todas formas.
-        return marco.evaluate(
-            "() => { const c = window.webix?.$$('cve'); return c?.getList?.()?.getFirstData?.()?.id ?? ''; }"
-        ) or ""
+            pass  # Se intenta leer de todas formas (puede haber llegado justo al límite).
+
+        resultado = marco.evaluate(
+            "() => {"
+            "  const c = window.webix?.$$('cve');"
+            "  const lista = c?.getList?.();"
+            "  return { id: lista?.getFirstData?.()?.id ?? '', total: lista?.count?.() ?? 0 };"
+            "}"
+        ) or {}
+        cve = str(resultado.get("id") or "")
+        if not cve:
+            logger.warning(
+                "[RPA] Combo 'cve' (Oficialía) sin datos tras la espera (%s opciones cargadas). "
+                "Configure RPA_OFICIALIA_CVE explícitamente si la cuenta tiene asignada más de "
+                "una oficialía, o si el combo nunca termina de cargar en esta red.",
+                resultado.get("total", 0),
+            )
+        return cve
 
     def _asignar_webix(self, marco, view_id: str, valor: Any, *, verificar: bool = False) -> None:
         """
