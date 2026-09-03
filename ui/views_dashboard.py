@@ -329,7 +329,11 @@ def pagina_bandeja() -> None:
         estado_ui["seleccion"] = []
 
     async def _confirmar_lote() -> None:
-        ids = list(estado_ui["seleccion"])
+        # .get(..., []): "seleccion" solo existe en estado_ui desde el primer
+        # tabla.on_select/_limpiar_seleccion — indexar directo lanzaba
+        # KeyError si el botón se alcanzaba a click-ear antes de esa primera
+        # escritura (visto en producción, ver barra_lote más abajo).
+        ids = list(estado_ui.get("seleccion") or [])
         if not ids:
             return
         pipeline = obtener_pipeline()
