@@ -155,6 +155,9 @@ class Configuracion(BaseSettings):
     # ------------------------------------------------------------------
     # Extracción IA — Gemini 2.5 Flash (SDK oficial google-genai)
     # ------------------------------------------------------------------
+    # Deliberadamente SIN default real: es un secreto y este archivo se
+    # versiona en git. Cárguela en el `.env` local (ignorado por git, ver
+    # `.gitignore`), nunca aquí ni en `.env.example`.
     gemini_api_key: str = ""            # Vacío ⇒ la extracción fallará de forma honesta
     gemini_modelo: str = "gemini-2.5-flash"
     gemini_timeout_ms: int = 45_000     # Límite de espera de la inferencia
@@ -173,14 +176,20 @@ class Configuracion(BaseSettings):
     # ------------------------------------------------------------------
     # RPA — Intranet Webix (op_cucs.fwx / op_ningr.fwx)
     # ------------------------------------------------------------------
-    rpa_modo: str = "simulacion"        # 'simulacion' (default seguro) | 'playwright' (real)
+    rpa_modo: str = "playwright"        # 'simulacion' (sin navegador) | 'playwright' (real, default de esta instalación)
     rpa_headless: bool = False          # false = navegador VISIBLE para depuración
     rpa_timeout_ms: int = 90_000        # Timeout por acción de Playwright
     rpa_reintentos: int = 3             # Reintentos ante errores transitorios
     rpa_simulacion_fallar: bool = False # true = el RPA simulado falla (probar ERROR_RPA)
     intranet_base_url: str = "https://sii.hcg.gob.mx/intranet/op_cucs.fwx"
-    intranet_http_username: str = ""    # Credenciales HTTP Basic de la Intranet
+    intranet_http_username: str = ""    # Credenciales HTTP Basic de la Intranet (si se omiten, se usa RPA_USUARIO/RPA_PASSWORD)
     intranet_http_password: str = ""
+    # Credenciales de la cuenta institucional para el login SII/Webix
+    # (RPA_USUARIO no es secreto por sí solo —es la clave de empleado—, pero
+    # RPA_PASSWORD SÍ lo es: queda deliberadamente sin default aquí; cárguela
+    # solo en el `.env` local, nunca en este archivo ni en `.env.example`).
+    rpa_usuario: str = "2010226"
+    rpa_password: str = ""
     rpa_oficialia_cve: str = ""         # CVE de oficialía precargada (combo Webix 'cve')
     rpa_hcg_dependencia_cve: str = ""   # CVE de dependencia cuando procedencia = HCG
     rpa_seccion_cve: str = ""           # CVE de sección (campo opcional 'seccion')
@@ -196,11 +205,24 @@ class Configuracion(BaseSettings):
     rpa_jitter_factor: float = 0.25         # Amplitud del jitter del backoff (±25% por defecto)
 
     # ------------------------------------------------------------------
+    # Exportación a carpeta compartida de red (SMB)
+    # ------------------------------------------------------------------
+    # Ruta UNC de la carpeta compartida donde se copia (best-effort, nunca
+    # bloquea el flujo) el PDF ya canónico al confirmarse en HITL. Vacío ⇒
+    # exportación desactivada. Ver core/file_manager.py::exportar_a_red_smb.
+    smb_export_dir: str = r"\\10.2.1.92\FAA_divserv_admvos\CORRESPONDENCIA\2026"
+
+    # ------------------------------------------------------------------
     # Sincronización externa — Google Sheets (cuenta de servicio)
     # ------------------------------------------------------------------
-    google_sheets_spreadsheet_id: str = ""   # Vacío ⇒ stub local (CSV espejo)
+    # ID de la hoja: no es secreto por sí solo (requiere además credenciales
+    # de Service Account para poder escribir), así que sí lleva default aquí.
+    google_sheets_spreadsheet_id: str = "1n4Y6m7DVqfp9b9cV3cMFh9NfaPde_ttE24FSYmkQOGw"
     google_sheets_sheet_name: str = "Hoja1"  # Nombre de la pestaña destino
-    google_service_account_json: str = ""    # JSON de la Service Account en UNA línea
+    # JSON de la Service Account en UNA línea. Alternativa sin secretos en
+    # el .env: coloque un archivo `credentials.json` (ver .gitignore) junto
+    # a los datos de la app, o exporte GOOGLE_APPLICATION_CREDENTIALS.
+    google_service_account_json: str = ""
 
     # ------------------------------------------------------------------
     # Validaciones
@@ -261,6 +283,11 @@ class Configuracion(BaseSettings):
         """True cuando hay hoja destino Y credenciales de Service Account."""
         return bool(self.google_sheets_spreadsheet_id.strip())
 
+    @property
+    def smb_export_configurado(self) -> bool:
+        """True cuando hay una carpeta de red SMB configurada como destino de exportación."""
+        return bool(self.smb_export_dir.strip())
+
     def resumen_arranque(self) -> list[str]:
         """Líneas de diagnóstico que se imprimen al iniciar (transparencia operativa)."""
         lineas = [
@@ -280,8 +307,12 @@ class Configuracion(BaseSettings):
                 f"                 sesión persistida hasta {self.rpa_session_ttl_min} min "
                 f"en {self.storage_root / '.rpa_sessions'}"
             )
+        if self.sheets_configurado:
+            lineas.append(f"Google Sheets  : hoja {self.google_sheets_spreadsheet_id} configurada")
+        else:
+            lineas.append("Google Sheets  : STUB LOCAL (CSV espejo en data/) — sin GOOGLE_SHEETS_SPREADSHEET_ID")
         lineas.append(
-            f"Google Sheets  : {'Service Account activa' if self.sheets_configurado else 'STUB LOCAL (CSV espejo en data/) — sin credenciales'}"
+            f"Export. SMB    : {'activa → ' + self.smb_export_dir if self.smb_export_configurado else 'desactivada (sin SMB_EXPORT_DIR)'}"
         )
         lineas.append(f"Vigilante      : {'activo sobre ' + str(self.dir_entrada) if self.watchfolder_enabled else 'desactivado'}")
         return lineas

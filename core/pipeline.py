@@ -40,7 +40,7 @@ from typing import Optional
 
 from config import Configuracion, get_settings
 from core.ai_extractor import ErrorExtraccionIA, ExtractorMetadatos
-from core.file_manager import GestorArchivos
+from core.file_manager import GestorArchivos, exportar_a_red_smb
 from core.heuristic_extractor import extraer_heuristico
 from core.models import (
     AccionAuditoria,
@@ -293,6 +293,28 @@ class FlujoDocumental:
             documento.ruta_archivo_actual, metadatos
         )
         logger.info("Archivo canónico consolidado: %s (sha %s…)", ruta_pdf, sha_final[:12])
+
+        # 1.b) Exportación best-effort a la carpeta de red SMB: un fallo de
+        # permisos/red sobre el recurso compartido NUNCA debe interrumpir la
+        # confirmación HITL (exportar_a_red_smb ya captura sus propios
+        # errores de E/S; este try/except es una red de seguridad adicional).
+        try:
+            destino_smb = exportar_a_red_smb(
+                self.archivos.absoluta(ruta_pdf),
+                {
+                    "folio": metadatos.numero_oficio,
+                    "fecha": metadatos.fecha_emision,
+                    "remitente": metadatos.remitente_nombre,
+                    "asunto": metadatos.asunto,
+                },
+                configuracion=self.config,
+            )
+            if destino_smb is not None:
+                logger.info("Copia exportada a la carpeta de red SMB: %s", destino_smb)
+            elif self.config.smb_export_configurado:
+                logger.warning("No se pudo exportar %s a la carpeta de red SMB (ver aviso anterior)", ruta_pdf)
+        except Exception:  # noqa: BLE001 — la exportación a red nunca debe abortar la confirmación
+            logger.exception("Fallo inesperado exportando %s a la carpeta de red SMB", ruta_pdf)
 
         # 2) Persistencia de la validación + transición a EJECUTANDO_RPA.
         campos_modificados = diferencia_metadatos(documento.metadatos_extraidos, metadatos)

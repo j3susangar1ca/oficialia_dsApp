@@ -25,13 +25,99 @@ import re
 import shutil
 import time
 from pathlib import Path
+from typing import Optional
 
+from config import Configuracion, get_settings
 from core.models import MetadatosOficio, nombre_archivo_canonico
 
 logger = logging.getLogger("oficialia.archivos")
 
 #: Prefijo que identifica las copias escritas por la propia app (canal WEB).
 PREFIJO_UPLOAD_PROPIO = re.compile(r"^\d{10,}_")
+
+#: Caracteres prohibidos en nombres de archivo de Windows (destino real del
+#: recurso SMB): \ / : * ? " < > |
+_CARACTERES_PROHIBIDOS_SMB_RE = re.compile(r'[\\/:*?"<>|]')
+
+#: Longitud máxima del campo "asunto" dentro del nombre de archivo exportado
+#: (evita rutas ilegibles o cercanas al límite de 260 caracteres de Windows).
+LONGITUD_MAXIMA_ASUNTO_SMB = 60
+
+
+def _sanear_campo_smb(valor: object, longitud_maxima: Optional[int] = None) -> str:
+    """
+    Limpia un campo para usarlo como componente del nombre de archivo SMB:
+    quita caracteres reservados de Windows, colapsa espacios a '_' y trunca
+    si excede `longitud_maxima`. Nunca devuelve una cadena vacía.
+    """
+    limpio = _CARACTERES_PROHIBIDOS_SMB_RE.sub("-", str(valor or "").strip())
+    limpio = re.sub(r"\s+", "_", limpio)
+    if longitud_maxima is not None and len(limpio) > longitud_maxima:
+        limpio = limpio[:longitud_maxima].rstrip("_-")
+    return limpio or "SIN_DATO"
+
+
+def exportar_a_red_smb(
+    ruta_pdf: Path, metadatos: dict, configuracion: Optional[Configuracion] = None
+) -> Optional[Path]:
+    """
+    Copia (best-effort) el PDF ya procesado a la carpeta compartida de red
+    (SMB_EXPORT_DIR) con nombre dinámico `{folio}_{fecha}_{remitente}_{asunto}.pdf`.
+
+    `metadatos` admite indistintamente las claves cortas (`folio`, `fecha`,
+    `remitente`, `asunto`) o los nombres de campo de `MetadatosOficio`
+    (`numero_oficio`, `fecha_emision`, `remitente_nombre`, `asunto`).
+
+    Nunca lanza excepción: un problema de red/permisos sobre el recurso
+    compartido (carpeta no montada, sin permisos de escritura, servidor
+    caído) se registra en el log y se devuelve `None` — la copia a SMB es
+    un efecto secundario, jamás debe interrumpir el flujo principal.
+
+    :returns: ruta absoluta del archivo copiado, o `None` si la exportación
+        está desactivada (`SMB_EXPORT_DIR` vacío) o falló.
+    """
+    config = configuracion or get_settings()
+    destino_dir_str = config.smb_export_dir.strip()
+    if not destino_dir_str:
+        logger.debug("Exportación a red SMB desactivada (SMB_EXPORT_DIR vacío)")
+        return None
+
+    destino_dir = Path(destino_dir_str)
+    try:
+        destino_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "[SMB] No se pudo asegurar la carpeta de red %s (¿montada? ¿permisos?): %s",
+            destino_dir, exc,
+        )
+        return None
+
+    folio = _sanear_campo_smb(metadatos.get("folio") or metadatos.get("numero_oficio"))
+    fecha = _sanear_campo_smb(metadatos.get("fecha") or metadatos.get("fecha_emision"))
+    remitente = _sanear_campo_smb(metadatos.get("remitente") or metadatos.get("remitente_nombre"))
+    asunto = _sanear_campo_smb(metadatos.get("asunto"), longitud_maxima=LONGITUD_MAXIMA_ASUNTO_SMB)
+
+    nombre_base = f"{folio}_{fecha}_{remitente}_{asunto}"
+    destino = destino_dir / f"{nombre_base}.pdf"
+
+    # Colisión de nombre (dos oficios que sanean al mismo nombre): sufijo
+    # numérico incremental, nunca se sobrescribe un archivo ya exportado.
+    contador = 1
+    while destino.exists():
+        destino = destino_dir / f"{nombre_base}_{contador}.pdf"
+        contador += 1
+
+    try:
+        shutil.copy2(ruta_pdf, destino)
+    except OSError as exc:
+        logger.warning(
+            "[SMB] Fallo al copiar %s → %s (posible problema de permisos de red): %s",
+            ruta_pdf, destino, exc,
+        )
+        return None
+
+    logger.info("[SMB] Documento exportado a la carpeta de red: %s", destino)
+    return destino
 
 
 class ErrorAlmacenamiento(Exception):

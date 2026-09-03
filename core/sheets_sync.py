@@ -12,10 +12,12 @@ A:M del adaptador original (`GoogleSheetsExternalSyncAdapter.ts`):
     I: Plazo (días)   | J: Datos sensibles| K: Archivo canónico
     L: Folio acuse RPA| M: RPA exitoso
 
-Modo stub local: sin `GOOGLE_SHEETS_SPREADSHEET_ID` (o sin credenciales),
-cada fila se refleja en `data/tablero_local.csv` — comportamiento "honesto"
-heredado del original: el pipeline principal NUNCA se bloquea por Sheets;
-el documento queda COMPLETADO y el estado de sincronización se persiste.
+Modo stub local: sin `GOOGLE_SHEETS_SPREADSHEET_ID` o sin credenciales de
+Google Cloud disponibles (`credentials.json` junto a los datos de la app,
+`GOOGLE_APPLICATION_CREDENTIALS` o `GOOGLE_SERVICE_ACCOUNT_JSON`), cada fila
+se refleja en `data/sheets_backup.csv` — comportamiento "honesto" heredado
+del original: el pipeline principal NUNCA se bloquea por Sheets; el
+documento queda COMPLETADO y el estado de sincronización se persiste.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import json
 import logging
 from typing import Optional
 
-from config import Configuracion, get_settings
+from config import DATOS_DIR, Configuracion, get_settings
 from core.models import DocumentoRegistro, EstadoSheets, ResultadoRpa, ahora_utc_iso
 
 logger = logging.getLogger("oficialia.sheets")
@@ -110,9 +112,19 @@ class SincronizadorSheets:
         return bool(self.config.google_service_account_json.strip()) or self._ruta_adc() is not None
 
     def _ruta_adc(self) -> Optional[str]:
+        """
+        Credenciales de Application Default (ADC): `GOOGLE_APPLICATION_CREDENTIALS`
+        si está definida, o si no un archivo `credentials.json` colocado junto a
+        los datos de la app (uso personal: evita capturar el JSON en el .env).
+        """
         import os
 
-        return os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or None
+        ruta_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if ruta_env:
+            return ruta_env
+
+        candidato = DATOS_DIR / "credentials.json"
+        return str(candidato) if candidato.is_file() else None
 
     def _abrir_hoja(self):
         """Abre (y cachea) la conexión a la hoja destino."""
@@ -174,7 +186,7 @@ class SincronizadorSheets:
     def _registrar_en_stub_local(
         self, documento: DocumentoRegistro, resultado_rpa: ResultadoRpa
     ) -> EstadoSheets:
-        ruta_csv = self.config.database_path.parent / "tablero_local.csv"
+        ruta_csv = self.config.database_path.parent / "sheets_backup.csv"
         ruta_csv.parent.mkdir(parents=True, exist_ok=True)
         existe = ruta_csv.exists()
 

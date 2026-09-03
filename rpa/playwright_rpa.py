@@ -11,11 +11,12 @@ embebido en el iframe `op_ningr.fwx`). Migración 1:1 del
 acuse institucional y screenshot de evidencia.
 
 Modo dual (config.RPA_MODO):
-    - 'playwright': automatización REAL con Chromium (requiere
-      `playwright install chromium` y credenciales/CVEs institucionales).
-    - 'simulacion' (default): modo seguro para pruebas locales — NO lanza
-      navegador, produce un acuse sintético y permite recorrer el ciclo
-      completo hasta COMPLETADO (o ERROR_RPA si RPA_SIMULACION_FALLAR=true).
+    - 'playwright' (default de esta instalación): automatización REAL con
+      Chromium (requiere `playwright install chromium` y credenciales/CVEs
+      institucionales — ver RPA_USUARIO/RPA_PASSWORD).
+    - 'simulacion': modo seguro para pruebas locales — NO lanza navegador,
+      produce un acuse sintético y permite recorrer el ciclo completo hasta
+      COMPLETADO (o ERROR_RPA si RPA_SIMULACION_FALLAR=true).
 
 Notas de ejecución: el worker corre en su propio hilo (ejecutor serializado
 del pipeline) con la API sincrónica de Playwright; nunca en el event loop
@@ -473,8 +474,11 @@ class RpaIntranet:
             "locale": "es-MX",
             "timezone_id": "America/Mexico_City",
         }
-        usuario = self.config.intranet_http_username.strip()
-        contrasena = self.config.intranet_http_password.strip()
+        # INTRANET_HTTP_USERNAME/PASSWORD tienen prioridad (credenciales HTTP
+        # dedicadas del recurso); si se omiten, se usa la cuenta institucional
+        # RPA_USUARIO/RPA_PASSWORD configurada para el login SII/Webix.
+        usuario = (self.config.intranet_http_username.strip() or self.config.rpa_usuario.strip())
+        contrasena = (self.config.intranet_http_password.strip() or self.config.rpa_password.strip())
         if usuario and contrasena:
             # HTTP Basic/Digest (para NTLM se requiere habilitar Negotiate en Chromium).
             opciones["http_credentials"] = {"username": usuario, "password": contrasena}
