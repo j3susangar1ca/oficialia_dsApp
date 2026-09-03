@@ -29,7 +29,7 @@ from typing import Any, Callable, Optional
 
 from nicegui import run, ui
 
-from core.models import DocumentoRegistro, EstadoDocumento, MetadatosOficio, meta_estado
+from core.models import DocumentoRegistro, EstadoDocumento, MetadatosOficio, MetodoExtraccion, meta_estado
 from ui.layout import aplicar_tema, encabezado, obtener_config, obtener_pipeline, tiempo_relativo
 
 logger = logging.getLogger("oficialia.ui.hitl")
@@ -244,6 +244,7 @@ def _panel_formulario(
 
             # ---- Banners de contexto por estado ----
             _banner_estado(documento)
+            _banner_extraccion_heuristica(documento)
 
             # ---- Formulario ----
             ui.label("Metadatos del oficio").classes("text-sm font-semibold text-slate-700")
@@ -296,6 +297,9 @@ def _panel_formulario(
                 ui.label(
                     "Formulario de solo lectura: el documento no está en revisión pendiente."
                 ).classes("text-[11px] text-slate-400")
+
+            # ---- Historial de auditoría ----
+            _panel_auditoria(documento, pipeline)
 
     # Bloqueo del formulario cuando no es editable.
     if not editable:
@@ -372,7 +376,9 @@ def _panel_formulario(
 
     async def _reintentar_rpa() -> None:
         try:
-            await run.io_bound(pipeline.reintentar_rpa, documento.id)
+            await run.io_bound(
+                pipeline.reintentar_rpa, documento.id, capturista["valor"].strip() or "CAPTURISTA-DEV"
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fallo al reintentar RPA de %s", documento.id)
             ui.notify(f"No se pudo reintentar: {exc}", type="negative", position="top")
@@ -387,8 +393,77 @@ def _panel_formulario(
 
 
 # ----------------------------------------------------------------------
+# Historial de auditoría
+# ----------------------------------------------------------------------
+_ETIQUETA_ACCION = {
+    "CONFIRMAR": "Confirmó y registró",
+    "CONFIRMAR_LOTE": "Confirmó en lote",
+    "DESCARTAR": "Descartó",
+    "REINTENTAR_RPA": "Reintentó el registro RPA",
+}
+
+
+def _panel_auditoria(documento: DocumentoRegistro, pipeline) -> None:
+    """
+    Historial de acciones HITL sobre este documento: quién, qué acción y
+    qué campos corrigió respecto de lo que extrajo la IA/heurística (ver
+    database.py::listar_auditoria, core.models.diferencia_metadatos).
+    Colapsado por defecto para no saturar la pantalla en el caso normal
+    (documento aún sin ninguna acción registrada).
+    """
+    try:
+        historial = pipeline.repo.listar_auditoria(documento.id)
+    except Exception:  # noqa: BLE001 — el historial es informativo, nunca debe romper la vista
+        logger.exception("No se pudo cargar el historial de auditoría de %s", documento.id)
+        return
+    if not historial:
+        return
+
+    with ui.expansion(f"Historial de auditoría ({len(historial)})", icon="history").classes(
+        "w-full text-xs"
+    ).props("dense"):
+        with ui.column().classes("w-full gap-2 q-pa-sm"):
+            for entrada in historial:
+                with ui.column().classes("gap-0.5 border-l-2 border-slate-200 pl-2"):
+                    ui.label(
+                        f"{_ETIQUETA_ACCION.get(entrada.accion.value, entrada.accion.value)} — "
+                        f"{entrada.revisor_usuario_id} · {tiempo_relativo(entrada.fecha)}"
+                    ).classes("text-xs font-medium text-slate-700")
+                    if entrada.campos_modificados:
+                        for campo, cambio in entrada.campos_modificados.items():
+                            ui.label(
+                                f"  {campo}: “{cambio.get('anterior') or '—'}” → “{cambio.get('nuevo') or '—'}”"
+                            ).classes("text-[11px] text-slate-500")
+
+
+# ----------------------------------------------------------------------
 # Banners de contexto
 # ----------------------------------------------------------------------
+def _banner_extraccion_heuristica(documento: DocumentoRegistro) -> None:
+    """
+    Advertencia imposible de pasar por alto cuando el formulario NO viene
+    de Gemini sino del extractor de respaldo por regex (core.heuristic_
+    extractor — se activa cuando la IA falla, ver core.pipeline). Todo lo
+    precargado salvo quizá número de oficio/fecha son placeholders
+    genéricos: el revisor debe completar/verificar campo por campo, nunca
+    solo confirmar.
+    """
+    if documento.extraccion_metodo != MetodoExtraccion.HEURISTICA_FALLBACK:
+        return
+    with ui.card().classes("bg-orange-50 border border-orange-200 w-full shadow-none rounded-lg gap-2"):
+        ui.icon("warning", color="orange-9").classes("text-xl")
+        with ui.column().classes("gap-0"):
+            ui.label("Extracción heurística de respaldo — la IA no estaba disponible").classes(
+                "text-sm font-semibold text-orange-900"
+            )
+            ui.label(
+                "Este formulario NO se precargó con Gemini: se rescató número de oficio y fecha "
+                "por texto plano (cuando fue posible) y todo lo demás quedó en un valor genérico "
+                "(\"NO ESPECIFICADO\", \"ILEGIBLE\"). Revise y complete CADA campo contra el visor "
+                "de PDF antes de confirmar — no se limite a corroborar lo precargado."
+            ).classes("text-xs text-orange-800")
+
+
 def _banner_estado(documento: DocumentoRegistro) -> None:
     estado = documento.estado
 

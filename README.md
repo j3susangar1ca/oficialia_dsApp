@@ -26,15 +26,22 @@
 4. **Ciclo de vida persistido en SQLite (WAL)**:
    `INGESTADO → EN_PREPROCESO → EXTRAYENDO → PENDIENTE_REVISION → EJECUTANDO_RPA → COMPLETADO`
    (con `ERROR_RPA` reinteligible y `DESCARTADO` terminal).
-5. **Revisión asistida (HITL)** en la web: bandeja con filtros/KPIs/buscador en vivo y
-   **split-screen 50/50** — visor de PDF a la izquierda, formulario precargado con la IA a la
-   derecha. Acciones: **[Confirmar y Registrar]**, **[Descartar]**, **[Reintentar RPA]**.
+5. **Revisión asistida (HITL)** en la web: bandeja con filtros/KPIs/buscador en vivo, **filtro de
+   rango de fechas de ingesta** y **split-screen 50/50** — visor de PDF a la izquierda, formulario
+   precargado con la IA a la derecha. Acciones: **[Confirmar y Registrar]**, **[Descartar]**,
+   **[Reintentar RPA]** y, sobre la bandeja, **[Confirmar seleccionados]** para aprobar en lote
+   varios documentos `PENDIENTE_REVISION` a la vez tal cual los extrajo la IA (excluye
+   automáticamente los de extracción heurística, que exigen edición manual). Un documento
+   extraído por el respaldo heurístico muestra un banner de advertencia imposible de ignorar.
 6. **Al confirmar**: renombrado canónico `YYYY-MM-DD__[FOLIO]__[REMITENTE].pdf` en
    `storage/03_procesados/YYYY/MM/` + **respaldo espejo `.json`** + verificación de hash
-   post-escritura.
+   post-escritura + **registro de auditoría** (quién confirmó/descartó/reintentó, qué campos
+   corrigió respecto de lo extraído — visible como historial en la pantalla de revisión).
 7. **RPA con Playwright**: inyección del oficio en la Intranet Webix (`op_cucs.fwx` → iframe
    `op_ningr.fwx`), subida del PDF canónico, captura del **folio de acuse** y screenshot de
-   evidencia. Modo dual `RPA_MODO=simulacion|playwright` y `RPA_HEADLESS=false` para ver el
+   evidencia. Navegador `RPA_NAVEGADOR=auto` (default): usa el Microsoft Edge ya instalado en
+   Windows 10/11 sin descargar nada, y solo si no está disponible cae al Chromium empaquetado por
+   el instalador. Modo dual `RPA_MODO=simulacion|playwright` y `RPA_HEADLESS=false` para ver el
    navegador.
 8. **Sincronización opcional a Google Sheets** (cuenta de servicio) con el layout A:M del tablero
    de control; sin credenciales funciona en **stub local** (`data/tablero_local.csv`).
@@ -55,8 +62,11 @@ no hace falta clonar el repositorio, instalar Python ni ejecutar `pip install`:
    versión etiquetada) y descargue **`OficialiaDigitalDSA-Setup.exe`**.
 2. Ejecútelo y siga el asistente (pide permisos de administrador **solo durante la
    instalación**, para escribir en `Archivos de programa` y crear la carpeta de datos
-   compartida). Puede omitir el componente **"Automatización RPA"** (~300 MB, el
-   navegador Chromium) si de momento solo va a usar el modo simulación/HITL.
+   compartida). El componente **"Automatización RPA"** (~300 MB, el navegador Chromium)
+   es opcional y puede omitirse en la mayoría de los casos: por defecto
+   (`RPA_NAVEGADOR=auto`) el RPA real usa primero el Microsoft Edge que Windows 10/11 ya
+   trae instalado de fábrica, sin descargar nada — el Chromium empaquetado solo entra como
+   respaldo si Edge no está disponible en ese equipo.
 3. Al terminar, el propio instalador ofrece abrir la aplicación — el navegador se abre
    solo en `http://127.0.0.1:8080`. También queda un acceso directo en el Escritorio y
    en el menú Inicio.
@@ -260,6 +270,19 @@ de IA simulado. `pytest.ini` fija `testpaths = tests`.
 .\packaging\build_windows.ps1
 ```
 
+## 6. Modos de operación
+
+| Módulo | Variable | Valores | Sin configurar |
+| --- | --- | --- | --- |
+| Extracción IA | `GEMINI_API_KEY` | clave real | **Falla honestamente**: documento en `DESCARTADO` con `AI_NO_CONFIGURADA` y archivo en cuarentena (no hay stub de IA para no falsear datos) |
+| RPA | `RPA_MODO` | `simulacion` \| `playwright` | `simulacion`: acuse sintético `HCG-OP-SIM-*`, sin navegador |
+| RPA navegador (ventana) | `RPA_HEADLESS` | `false` (visible) \| `true` | `false` — ver el navegador al inyectar |
+| RPA navegador (motor) | `RPA_NAVEGADOR` | `auto` \| `msedge` \| `chromium` | `auto` — Edge del sistema primero, Chromium empaquetado como respaldo |
+| Forzar fallo RPA simulado | `RPA_SIMULACION_FALLAR` | `true` \| `false` | `false` — útiles para ejercitar `ERROR_RPA` + reintento |
+| Google Sheets | `GOOGLE_SHEETS_SPREADSHEET_ID` + credenciales | Service Account (JSON en una línea o `GOOGLE_APPLICATION_CREDENTIALS`) | **Stub local**: `data/tablero_local.csv` |
+| Watchfolder | `WATCHFOLDER_ENABLED` | `true` \| `false` | `true` |
+
+Layout del tablero de Sheets (fila 1 = encabezados, gestionados por usted):
 Para generar solamente `dist\OficialiaDigitalDSA` sin requerir Inno Setup:
 
 ```powershell
@@ -294,6 +317,17 @@ packaging/              PyInstaller, PowerShell e Inno Setup para Windows
 
 ## Contribución y operación
 
+| Síntoma | Causa y remedio |
+| --- | --- |
+| Documentos caen en `DESCARTADO` con `AI_NO_CONFIGURADA` | Falta `GEMINI_API_KEY` en `.env` (comportamiento honesto: no hay stub de IA) |
+| `El registro en la Intranet falló (HTTP 401)` | Credenciales `INTRANET_HTTP_USERNAME/PASSWORD` inválidas; si la Intranet usa NTLM, habilite Negotiate para Chromium |
+| `FORMULARIO_WEBIX_TIMEOUT` | La Intranet no expone `op_ningr.fwx` en el iframe o los `view id` cambiaron — revise selectores |
+| El visor PDF no muestra el documento | El navegador debe tener visor PDF nativo (Chrome/Edge/Firefox modernos lo traen); use «Abrir en pestaña nueva» |
+| Watcher no detecta archivos sobre montaje SMB | Confirme `WATCHFOLDER_ENABLED=true`; el poll de respaldo (cada 5 s) barre el directorio de todos modos |
+| Puerto ocupado | Cambie `APP_PORT` en `.env` (o en `%ProgramData%\OficialiaDigitalDSA\.env` si usa el instalador Windows) |
+| `NAVEGADOR_NO_DISPONIBLE` | Ni Edge del sistema ni el Chromium empaquetado están disponibles — instale Microsoft Edge, o reinstale marcando el componente "Automatización RPA", o cambie `RPA_MODO=simulacion` |
+| (Instalador Windows) No abre el navegador solo | Ábralo manualmente en `http://127.0.0.1:8080`; revise la ventana de consola de la app por errores |
+| Botón "Confirmar seleccionados" omite un documento | Normal si no está en `PENDIENTE_REVISION` o si su método de extracción es `HEURISTICA_FALLBACK` (requiere edición manual campo por campo) — el motivo exacto queda en la notificación |
 1. Cree una rama de trabajo y mantenga los secretos fuera del repositorio.
 2. Cambie la configuración únicamente a través de `Configuracion` y `get_settings()`; los módulos no deben leer el entorno directamente.
 3. Ejecute la comprobación de compilación antes de abrir una revisión.

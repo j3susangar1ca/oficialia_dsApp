@@ -317,7 +317,7 @@ class RpaIntranet:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
-            navegador = p.chromium.launch(headless=self.config.rpa_headless)
+            navegador = self._lanzar_navegador(p)
             try:
                 contexto = self._crear_contexto_con_sesion(navegador)
                 pagina = contexto.new_page()
@@ -385,6 +385,48 @@ class RpaIntranet:
                 ) from exc
             finally:
                 navegador.close()
+
+    # ------------------------------------------------------------------
+    # Selección de navegador
+    # ------------------------------------------------------------------
+    def _lanzar_navegador(self, p):
+        """
+        Lanza el navegador según `RPA_NAVEGADOR`:
+
+          - 'auto' (default): intenta primero el Microsoft Edge YA instalado
+            en el sistema (preinstalado de fábrica en Windows 10 1809+ y en
+            todo Windows 11 — Playwright lo localiza vía el argumento
+            `channel="msedge"`, SIN descargar ni empaquetar nada) y, si no
+            está disponible, cae al Chromium empaquetado por el instalador
+            en `pw-browsers/` (componente opcional, ver packaging/oficialia.iss).
+          - 'msedge': solo Edge del sistema — falla explícito si no está.
+          - 'chromium': solo el Chromium empaquetado — omite Edge por completo.
+
+        Preferir Edge reduce la dependencia del componente de ~300 MB del
+        instalador a un respaldo, no un requisito: la automatización real
+        funciona de fábrica en cualquier Windows 10/11 sin marcar esa casilla.
+        """
+        preferencia = self.config.rpa_navegador
+        intentos: list[tuple[str, dict]] = []
+        if preferencia in ("auto", "msedge"):
+            intentos.append(("Microsoft Edge (sistema)", {"channel": "msedge"}))
+        if preferencia in ("auto", "chromium"):
+            intentos.append(("Chromium (empaquetado)", {}))
+
+        ultimo_error: Optional[Exception] = None
+        for nombre, kwargs in intentos:
+            try:
+                navegador = p.chromium.launch(headless=self.config.rpa_headless, **kwargs)
+                logger.info("[RPA] Navegador en uso: %s", nombre)
+                return navegador
+            except Exception as exc:  # noqa: BLE001 — se prueba el siguiente candidato
+                logger.warning("[RPA] No se pudo lanzar %s: %s", nombre, exc)
+                ultimo_error = exc
+
+        raise ErrorRpa(
+            "NAVEGADOR_NO_DISPONIBLE",
+            f"Ningún navegador disponible para RPA_NAVEGADOR={preferencia!r}: {ultimo_error}",
+        )
 
     # ------------------------------------------------------------------
     # Ciclo de vida de sesión

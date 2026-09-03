@@ -16,6 +16,7 @@ del pipeline y de la UI) y cierra con commit automático.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from contextlib import contextmanager
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Iterator, Optional, Sequence
 
 from core.models import (
+    AccionAuditoria,
     DocumentoRegistro,
     EstadoDocumento,
     EstadoSheets,
@@ -30,6 +32,7 @@ from core.models import (
     MetadatosOficio,
     MetodoExtraccion,
     OrigenIngesta,
+    RegistroAuditoria,
     ResultadoRpa,
     ahora_utc_iso,
 )
@@ -76,6 +79,22 @@ CREATE INDEX IF NOT EXISTS idx_documentos_numero_oficio ON documentos(numero_ofi
 CREATE INDEX IF NOT EXISTS idx_documentos_estado        ON documentos(estado);
 CREATE INDEX IF NOT EXISTS idx_documentos_estado_fecha  ON documentos(estado, fecha_ingesta);
 CREATE INDEX IF NOT EXISTS idx_documentos_fecha_ingesta ON documentos(fecha_ingesta);
+
+-- Auditoría HITL: quién validó/descartó/reintentó qué documento, qué campos
+-- corrigió respecto de lo que extrajo la IA (o la heurística) y cuándo.
+-- Relación N:1 con documentos (varias acciones a lo largo de la vida de un
+-- mismo documento: confirmar, descartar, reintentar RPA).
+CREATE TABLE IF NOT EXISTS auditoria_hitl (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    documento_id          TEXT NOT NULL REFERENCES documentos(id),
+    revisor_usuario_id    TEXT NOT NULL,
+    accion                TEXT NOT NULL
+        CHECK (accion IN ('CONFIRMAR', 'DESCARTAR', 'REINTENTAR_RPA', 'CONFIRMAR_LOTE')),
+    campos_modificados    TEXT,
+    fecha                 TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_auditoria_documento ON auditoria_hitl(documento_id, fecha);
 """
 
 # ======================================================================
@@ -109,9 +128,31 @@ def _migracion_0_a_1(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migracion_1_a_2(conn: sqlite3.Connection) -> None:
+    """
+    v1 → v2: crea la tabla `auditoria_hitl` (trazabilidad de quién confirmó/
+    descartó/reintentó cada documento y qué campos corrigió respecto de lo
+    que extrajo la IA/heurística).
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS auditoria_hitl (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            documento_id          TEXT NOT NULL REFERENCES documentos(id),
+            revisor_usuario_id    TEXT NOT NULL,
+            accion                TEXT NOT NULL
+                CHECK (accion IN ('CONFIRMAR', 'DESCARTAR', 'REINTENTAR_RPA', 'CONFIRMAR_LOTE')),
+            campos_modificados    TEXT,
+            fecha                 TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_auditoria_documento ON auditoria_hitl(documento_id, fecha)")
+
+
 #: Migraciones en orden: `_MIGRACIONES[N]` lleva de la versión N a la N+1.
 #: `VERSION_ESQUEMA` (= len(_MIGRACIONES)) es la versión objetivo actual.
-_MIGRACIONES: list = [_migracion_0_a_1]
+_MIGRACIONES: list = [_migracion_0_a_1, _migracion_1_a_2]
 VERSION_ESQUEMA: int = len(_MIGRACIONES)
 
 
@@ -457,9 +498,18 @@ class RepositorioDocumentos:
         *,
         estados: Optional[Sequence[EstadoDocumento]] = None,
         texto_busqueda: str = "",
+        fecha_desde: Optional[str] = None,
+        fecha_hasta: Optional[str] = None,
         limite: int = 200,
     ) -> list[DocumentoRegistro]:
-        """Bandeja: filtro por estados + buscador en vivo (archivo/folio/remitente/asunto)."""
+        """
+        Bandeja: filtro por estados + buscador en vivo (archivo/folio/remitente/
+        asunto) + rango de fechas de ingesta (histórico, ej. sobre documentos
+        ya archivados en 03_procesados).
+
+        :param fecha_desde: fecha ISO `YYYY-MM-DD` (inclusive, inicio del día).
+        :param fecha_hasta: fecha ISO `YYYY-MM-DD` (inclusive, fin del día).
+        """
         condiciones: list[str] = []
         parametros: list[object] = []
 
@@ -476,6 +526,15 @@ class RepositorioDocumentos:
             )
             like = f"%{texto}%"
             parametros.extend([like, like, like])
+
+        # Comparación lexicográfica válida: fecha_ingesta es ISO 8601 UTC
+        # ("YYYY-MM-DDTHH:MM:SS.sssZ"), así que ordena igual que el calendario.
+        if fecha_desde:
+            condiciones.append("fecha_ingesta >= ?")
+            parametros.append(f"{fecha_desde}T00:00:00.000Z")
+        if fecha_hasta:
+            condiciones.append("fecha_ingesta <= ?")
+            parametros.append(f"{fecha_hasta}T23:59:59.999Z")
 
         where = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
         sql = f"SELECT * FROM documentos {where} ORDER BY fecha_ingesta DESC LIMIT ?"
@@ -506,6 +565,60 @@ class RepositorioDocumentos:
             "total": sum(conteo.values()),
         }
 
+    # ------------------------------------------------------------------
+    # Auditoría HITL
+    # ------------------------------------------------------------------
+    def registrar_auditoria(
+        self,
+        doc_id: str,
+        revisor: str,
+        accion: AccionAuditoria,
+        campos_modificados: Optional[dict[str, dict[str, Optional[str]]]] = None,
+    ) -> RegistroAuditoria:
+        """Deja constancia de una acción HITL (confirmar/descartar/reintentar)."""
+        fecha = ahora_utc_iso()
+        with self._conexion() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO auditoria_hitl (documento_id, revisor_usuario_id, accion, campos_modificados, fecha)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    doc_id,
+                    revisor,
+                    accion.value,
+                    json.dumps(campos_modificados, ensure_ascii=False) if campos_modificados else None,
+                    fecha,
+                ),
+            )
+            id_insertado = cursor.lastrowid
+        return RegistroAuditoria(
+            id=id_insertado,
+            documento_id=doc_id,
+            revisor_usuario_id=revisor,
+            accion=accion,
+            campos_modificados=campos_modificados or {},
+            fecha=fecha,
+        )
+
+    def listar_auditoria(self, doc_id: str) -> list[RegistroAuditoria]:
+        """Historial de acciones HITL sobre un documento, más reciente primero."""
+        with self._conexion() as conn:
+            filas = conn.execute(
+                "SELECT * FROM auditoria_hitl WHERE documento_id = ? ORDER BY fecha DESC, id DESC",
+                (doc_id,),
+            ).fetchall()
+        return [
+            RegistroAuditoria(
+                id=fila["id"],
+                documento_id=fila["documento_id"],
+                revisor_usuario_id=fila["revisor_usuario_id"],
+                accion=AccionAuditoria(fila["accion"]),
+                campos_modificados=json.loads(fila["campos_modificados"]) if fila["campos_modificados"] else {},
+                fecha=fila["fecha"],
+            )
+            for fila in filas
+        ]
 
 
 def iniciar_bd() -> RepositorioDocumentos:
