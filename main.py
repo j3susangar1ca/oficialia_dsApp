@@ -99,8 +99,18 @@ def _registrar_rutas_archivos() -> None:
         ruta = (configuracion.storage_root / documento.ruta_archivo_actual).resolve()
         if not ruta.is_file():
             raise HTTPException(status_code=404, detail="Archivo físico no disponible")
+        # content_disposition_type="inline": el default de Starlette es
+        # "attachment", que le dice al navegador que DESCARGUE el archivo en
+        # vez de mostrarlo — con "attachment" el <iframe> del visor HITL no
+        # renderiza el PDF embebido, el navegador lo entrega al manejador
+        # del sistema operativo para .pdf (Adobe Acrobat en producción) y se
+        # abre en una ventana aparte. "inline" preserva filename= como
+        # sugerencia de nombre solo para un "Guardar como" explícito.
         return FileResponse(
-            ruta, media_type="application/pdf", filename=documento.nombre_archivo_original
+            ruta,
+            media_type="application/pdf",
+            filename=documento.nombre_archivo_original,
+            content_disposition_type="inline",
         )
 
     @app.get("/evidencia/{doc_id}")

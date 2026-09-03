@@ -981,20 +981,49 @@ class RpaIntranet:
             time.sleep(espera_ms / 1000)
 
     def _extraer_folio_confirmacion(self, pagina, dialogo: dict[str, Any]) -> str:
-        """Sondea diálogo, texto de página/frames y URL hasta dar con el folio."""
-        plazo = time.monotonic() + self.config.rpa_timeout_ms / 1000
+        """
+        Sondea diálogo, texto de página/frames y URL hasta dar con el folio.
+
+        Presupuesto generoso y DISTINTO de RPA_TIMEOUT_MS
+        (RPA_ESPERA_CONFIRMACION_MS, 5 min por defecto): la Intranet SII a
+        veces exige que el operador valide manualmente en la ventana
+        visible (RPA_HEADLESS=false) antes de confirmar el registro, y esa
+        validación puede tardar minutos — RPA_TIMEOUT_MS está pensado para
+        acciones puntuales de Playwright (clics, selectores), no para
+        tolerar una intervención humana. Sin este margen separado, aquí se
+        declaraba ERROR_RPA mientras el operador todavía estaba validando,
+        aunque el oficio terminara registrándose bien segundos después
+        (confirmado en producción).
+        """
+        presupuesto_s = self.config.rpa_espera_confirmacion_ms / 1000
+        plazo = time.monotonic() + presupuesto_s
+        logger.info(
+            "[RPA] Esperando folio de confirmación (hasta %.0f s — puede requerir "
+            "validación manual del operador en la ventana visible)…",
+            presupuesto_s,
+        )
+        ultimo_aviso = time.monotonic()
         while time.monotonic() < plazo:
             if dialogo.get("folio"):
                 return str(dialogo["folio"])
             folio = self._leer_folio_de_pagina(pagina)
             if folio:
                 return folio
-            time.sleep(0.25)
+            if time.monotonic() - ultimo_aviso >= 30:
+                logger.info(
+                    "[RPA] Aún esperando confirmación… %.0f s restantes.",
+                    max(plazo - time.monotonic(), 0),
+                )
+                ultimo_aviso = time.monotonic()
+            time.sleep(1.0)
         if dialogo.get("folio"):
             return str(dialogo["folio"])
         raise ErrorRpa(
             "FOLIO_CONFIRMACION_NO_ENCONTRADO",
-            "No fue posible extraer el folio institucional de confirmación.",
+            f"No fue posible extraer el folio institucional de confirmación tras "
+            f"{presupuesto_s:.0f} s de espera. Verifique manualmente en la Intranet "
+            f"si el oficio quedó registrado antes de reintentar (evita un posible "
+            f"duplicado).",
         )
 
     def _leer_folio_de_pagina(self, pagina) -> Optional[str]:

@@ -218,6 +218,15 @@ class Configuracion(BaseSettings):
     rpa_reintento_max_ms: int = 30_000      # Techo del backoff exponencial
     rpa_session_ttl_min: int = 30           # Minutos de vida útil del storage_state persistido
     rpa_jitter_factor: float = 0.25         # Amplitud del jitter del backoff (±25% por defecto)
+    # Espera del FOLIO de confirmación tras enviar el formulario — deliberadamente
+    # MUCHO más generosa que rpa_timeout_ms (que rige acciones puntuales de
+    # Playwright): la Intranet SII a veces exige validación manual del
+    # operador en la ventana visible (RPA_HEADLESS=false) antes de confirmar
+    # el registro, y esa validación puede tardar minutos, no segundos. Sin
+    # este margen, _extraer_folio_confirmacion declaraba ERROR_RPA mientras
+    # el operador todavía estaba validando — aunque el oficio SÍ terminara
+    # registrándose correctamente segundos después (confirmado en producción).
+    rpa_espera_confirmacion_ms: int = 300_000  # 5 minutos
 
     # ------------------------------------------------------------------
     # Exportación a carpeta compartida de red (SMB)
