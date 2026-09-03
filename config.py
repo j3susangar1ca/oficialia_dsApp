@@ -190,7 +190,13 @@ class Configuracion(BaseSettings):
     # solo en el `.env` local, nunca en este archivo ni en `.env.example`).
     rpa_usuario: str = "2010226"
     rpa_password: str = ""
-    rpa_oficialia_cve: str = ""         # CVE de oficialía precargada (combo Webix 'cve')
+    rpa_oficialia_cve: str = ""         # CVE de oficialía (combo Webix 'cve'). Vacío ⇒ se
+                                         # toma la primera opción del combo — RECOMENDADO
+                                         # configurarla explícita si la cuenta RPA_USUARIO
+                                         # tiene asignada más de una oficialía, o si el
+                                         # combo tarda en cargar y produce FORMULARIO_
+                                         # WEBIX_TIMEOUT (ver rpa/playwright_rpa.py::
+                                         # _resolver_cve_oficialia).
     rpa_hcg_dependencia_cve: str = ""   # CVE de dependencia cuando procedencia = HCG
     rpa_seccion_cve: str = ""           # CVE de sección (campo opcional 'seccion')
     rpa_navegador: str = "auto"         # 'auto' (Edge del sistema, respaldo Chromium empaquetado)

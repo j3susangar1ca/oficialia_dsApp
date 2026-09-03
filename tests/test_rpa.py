@@ -188,3 +188,56 @@ class TestAbrirSubmoduloIngreso:
         with pytest.raises(ErrorRpa) as info:
             rpa._abrir_submodulo_ingreso(pagina)
         assert info.value.codigo == "FORMULARIO_WEBIX_TIMEOUT"
+
+
+class _MarcoFalso:
+    """Doble mínimo de `playwright.sync_api.Frame` para _resolver_cve_oficialia."""
+
+    def __init__(self, *, datos_disponibles: bool, id_cve: str = "", total: int = 0):
+        self.datos_disponibles = datos_disponibles
+        self.id_cve = id_cve
+        self.total = total
+        self.evaluate_llamadas: list[str] = []
+
+    def evaluate(self, script: str, arg=None):
+        self.evaluate_llamadas.append(script)
+        if "return { id:" in script:  # lectura final (id + total de opciones)
+            return {"id": self.id_cve, "total": self.total}
+        return None  # open()/close() del combo: best-effort, sin valor de retorno usado
+
+    def wait_for_function(self, expresion, arg=None, timeout=0):
+        if not self.datos_disponibles:
+            raise TimeoutError("combo 'cve' sin datos dentro del timeout")
+
+
+class TestResolverCveOficialia:
+    """
+    _resolver_cve_oficialia: RPA_OFICIALIA_CVE explícita tiene prioridad;
+    a falta de ella, se fuerza la apertura del combo 'cve' (algunos combos
+    Webix ligados a un `suggest` solo cargan su lista al abrirse) y se
+    sondea su primera opción — nunca lanza, solo devuelve "" si el combo
+    sigue vacío (quien decide si eso es fatal es _rellenar_formulario_webix).
+    """
+
+    @pytest.fixture
+    def rpa(self, configuracion):
+        cfg = configuracion.model_copy(update={"rpa_modo": "playwright"})
+        return RpaIntranet(cfg)
+
+    def test_usa_rpa_oficialia_cve_sin_tocar_el_combo(self, configuracion):
+        cfg = configuracion.model_copy(update={"rpa_modo": "playwright", "rpa_oficialia_cve": "FDSA"})
+        rpa = RpaIntranet(cfg)
+        marco = _MarcoFalso(datos_disponibles=False)  # ni se debería consultar
+
+        assert rpa._resolver_cve_oficialia(marco) == "FDSA"
+        assert marco.evaluate_llamadas == []
+
+    def test_resuelve_la_primera_opcion_cuando_el_combo_carga_datos(self, rpa):
+        marco = _MarcoFalso(datos_disponibles=True, id_cve="FDSA", total=3)
+
+        assert rpa._resolver_cve_oficialia(marco) == "FDSA"
+
+    def test_devuelve_vacio_sin_lanzar_si_el_combo_nunca_carga(self, rpa):
+        marco = _MarcoFalso(datos_disponibles=False, total=0)
+
+        assert rpa._resolver_cve_oficialia(marco) == ""
