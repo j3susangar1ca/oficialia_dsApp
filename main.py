@@ -155,6 +155,6 @@ ui.run(
     title=configuracion.app_titulo,
     reload=False,          # imprescindible con hilos de fondo
     show=False,
-    favicon="📖",
+    favicon="🏥",
     dark=False,
 )
