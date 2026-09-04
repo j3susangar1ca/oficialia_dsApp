@@ -37,7 +37,6 @@ logger = logging.getLogger("oficialia.main")
 
 from core.ai_extractor import ExtractorMetadatos  # noqa: E402
 from core.file_manager import GestorArchivos  # noqa: E402
-from core.models import DocumentoRegistro, EstadoDocumento, ResultadoRpa  # noqa: E402
 from core.pipeline import FlujoDocumental  # noqa: E402
 from core.sheets_sync import SincronizadorSheets  # noqa: E402
 from core.watcher import VigilanteCarpetas  # noqa: E402

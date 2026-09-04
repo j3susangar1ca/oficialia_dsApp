@@ -1,4 +1,4 @@
-"""
+r"""
 SISTEMA OFICIALIA-DIGITAL-DSA (reconstrucción 100% Python)
 ==========================================================
 config.py — Configuración centralizada de toda la aplicación.
