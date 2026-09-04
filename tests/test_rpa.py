@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 import time
 
 import pytest
@@ -80,6 +81,10 @@ class TestGestorSesiones:
         assert gs.estado_fresco is True
         assert "storage_state" in gs.opciones_contexto()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="NTFS no usa bits de permiso POSIX: os.chmod no produce 0700/0600 en Windows.",
+    )
     def test_directorio_y_archivo_con_permisos_restringidos(self, configuracion):
         """El storage_state contiene cookies de sesión: no debe ser legible por otros usuarios."""
         gs = GestorSesiones(configuracion)
