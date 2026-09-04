@@ -69,9 +69,6 @@ from core.models import DocumentoRegistro, ResultadoRpa
 
 logger = logging.getLogger("oficialia.rpa")
 
-#: URL institucional por omisión (op_cucs.fwx).
-URL_INTRANET_POR_DEFECTO = "https://sii.hcg.gob.mx/intranet/op_cucs.fwx"
-
 #: Selector del iframe que contiene el formulario de ingreso.
 SELECTOR_IFRAME = 'iframe[src*="op_ningr.fwx"]'
 

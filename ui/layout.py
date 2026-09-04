@@ -64,7 +64,6 @@ REVISOR_POR_DEFECTO = "REVISOR-DSA"
 #: de gobierno/salud.
 COLOR_PRIMARIO = "#1d4ed8"
 COLOR_PRIMARIO_OSCURO = "#1e3a8a"
-COLOR_PRIMARIO_SUAVE = "#eff6ff"
 
 #: Fondo general de página: gris casi blanco para que las tarjetas
 #: blancas floten con una separación sutil (look "premium minimalista"
