@@ -22,14 +22,26 @@ detiene el sistema completo de forma limpia.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
-
-from nicegui import app, ui
 
 # ----------------------------------------------------------------------
 # 1) Logging y configuración
 # ----------------------------------------------------------------------
+# IMPORTANTE: config.py se importa ANTES que nicegui. NiceGUI fija su
+# carpeta de persistencia local (Storage.path, donde vive app.storage.general
+# / .user) como atributo de clase leído de NICEGUI_STORAGE_PATH en el
+# momento del import — si no se define antes, usa ".nicegui" relativo al
+# directorio de trabajo. En el ejecutable empaquetado eso resuelve a
+# "Archivos de programa\OficialiaDigitalDSA\.nicegui", de solo lectura para
+# un usuario estándar, y NiceGUI lanza PermissionError en cada respaldo
+# periódico. Se redirige a la carpeta de datos escribible (DATOS_DIR) antes
+# del import para que coincida con storage_root/database_path.
 from config import DATOS_DIR, EMPAQUETADO, get_settings  # noqa: E402
+
+os.environ.setdefault("NICEGUI_STORAGE_PATH", str(DATOS_DIR / ".nicegui"))
+
+from nicegui import app, ui  # noqa: E402
 from core.logging_setup import configurar_logging  # noqa: E402
 
 configurar_logging(DATOS_DIR)
