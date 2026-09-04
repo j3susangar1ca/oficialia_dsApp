@@ -1,55 +1,52 @@
-name: Instalador de Windows
+﻿name: Compilar Instalador Windows
 
-# Construye el instalador de un solo archivo (OficialiaDigitalDSA-Setup.exe)
-# en un runner de Windows: el usuario final lo descarga desde la pestaña
-# "Actions" (artefacto de cada ejecución) o desde "Releases" (al empujar un
-# tag v*) y lo ejecuta — sin instalar Python, pip, Playwright ni ninguna
-# otra dependencia por su cuenta.
-#
-# PyInstaller no compila de forma cruzada: por eso este workflow corre en
-# `windows-latest` y no en Linux, aunque el resto del repo se desarrolle
-# fuera de Windows.
-
-"on":
+on:
   push:
+    branches: [ main ]
     tags:
-      - "v*"
-  workflow_dispatch: {}   # permite lanzarlo a mano desde la pestaña Actions
-
-permissions:
-  contents: write   # necesario para adjuntar el instalador a un Release
+      - 'v*.*.*'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
-      - name: Descargar el código
+      - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Configurar Python 3.11
+      - name: Configurar Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.13'
+          cache: 'pip'
 
       - name: Instalar Inno Setup
         run: choco install innosetup -y --no-progress
 
-      - name: Construir la aplicación y el instalador
-        shell: pwsh
-        run: .\packaging\build_windows.ps1
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r packaging/requirements-build.txt
+          pip install pytest
 
-      - name: Publicar el instalador como artefacto de esta ejecución
+      - name: Instalar Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Ejecutar pruebas
+        run: pytest tests/ -v
+
+      - name: Compilar instalador
+        run: .\packaging\build_windows.ps1
+        shell: powershell
+
+      - name: Subir artefacto
         uses: actions/upload-artifact@v4
         with:
-          name: OficialiaDigitalDSA-Setup
-          path: dist\installer\OficialiaDigitalDSA-Setup.exe
+          name: OficialiaDigitalDSA-Instalador-Windows
+          path: |
+            dist/*.exe
+            packaging/output/*.exe
           if-no-files-found: error
-
-      - name: Adjuntar el instalador a la Release (solo en tags v*)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist\installer\OficialiaDigitalDSA-Setup.exe
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          retention-days: 14
