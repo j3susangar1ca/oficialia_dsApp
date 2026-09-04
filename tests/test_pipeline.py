@@ -11,7 +11,7 @@ import pymupdf
 import pytest
 
 from core.ai_extractor import ErrorExtraccionIA
-from core.models import EstadoDocumento, MetodoExtraccion, OrigenIngesta
+from core.models import EstadoDocumento, MetadatosOficio, MetodoExtraccion, OrigenIngesta, Procedencia
 from core.pipeline import FlujoDocumental
 
 
@@ -43,6 +43,33 @@ class _ExtractorFalso:
         if self.codigo_error:
             raise ErrorExtraccionIA(self.codigo_error, f"Fallo simulado ({self.codigo_error})")
         raise AssertionError("Este doble no simula el camino de éxito de la IA")
+
+
+class _ExtractorCapturaPistas:
+    """Doble de ExtractorMetadatos que simula ÉXITO de la IA y registra los
+    kwargs recibidos — para verificar que core.pipeline efectivamente
+    ejecuta el preprocesamiento heurístico y lo reenvía a
+    extraer_de_paginas ANTES de la llamada (no lo descarta, no lo pierde)."""
+
+    def __init__(self):
+        self.llamadas: list[dict] = []
+
+    def extraer_de_paginas(self, paginas, *, anio_contexto, textos_ocr=None, pistas_heuristicas=None):
+        self.llamadas.append({
+            "paginas": paginas,
+            "anio_contexto": anio_contexto,
+            "textos_ocr": textos_ocr,
+            "pistas_heuristicas": pistas_heuristicas,
+        })
+        return MetadatosOficio(
+            numero_oficio="DSA-2026-777-OF",
+            fecha_emision="2026-08-15",
+            procedencia=Procedencia.AJENA,
+            dependencia_area="NO ESPECIFICADO",
+            remitente_nombre="ALGUIEN",
+            destinatario_nombre="ALGUIEN MAS",
+            asunto="Asunto de prueba con longitud suficiente para el contrato.",
+        )
 
 
 @pytest.fixture
@@ -100,3 +127,39 @@ class TestRespaldoHeuristico:
         assert registro.estado == EstadoDocumento.PENDIENTE_REVISION
         assert registro.extraccion_metodo == MetodoExtraccion.HEURISTICA_FALLBACK
         assert registro.numero_oficio == "S/N"
+
+
+class TestPreprocesamientoHeuristicoPreviaALaIA:
+    """Fase previa (core.heuristic_extractor.extraer_pistas): debe ejecutarse
+    ANTES de llamar a extraer_de_paginas y reenviarse como kwarg, incluso
+    cuando la IA tiene éxito (no es exclusiva del camino de respaldo)."""
+
+    def test_pistas_llegan_a_extraer_de_paginas_en_camino_exitoso(self, flujo):
+        extractor = _ExtractorCapturaPistas()
+        pipeline = flujo(extractor)
+        registro = pipeline.ingestar_y_procesar(
+            "oficio.pdf", OrigenIngesta.WEB_DRAG_DROP, _pdf_con_oficio()
+        )
+
+        assert registro.estado == EstadoDocumento.PENDIENTE_REVISION
+        assert registro.extraccion_metodo == MetodoExtraccion.IA  # no es el camino de respaldo
+        assert len(extractor.llamadas) == 1
+        pistas = extractor.llamadas[0]["pistas_heuristicas"]
+        assert pistas is not None
+        assert pistas.numero_oficio == "DSA-2026-777-OF"
+        assert pistas.fecha_emision == "2026-08-15"
+
+    def test_sin_texto_disponible_pasa_pistas_vacias_sin_abortar(self, flujo):
+        """Documento sin capa de texto (fax/escaneo): el preprocesamiento no
+        encuentra nada, pero la ingesta sigue su curso normal con la IA."""
+        extractor = _ExtractorCapturaPistas()
+        pipeline = flujo(extractor)
+        registro = pipeline.ingestar_y_procesar(
+            "oficio.pdf", OrigenIngesta.WEB_DRAG_DROP, _pdf_en_blanco()
+        )
+
+        assert registro.estado == EstadoDocumento.PENDIENTE_REVISION
+        assert registro.extraccion_metodo == MetodoExtraccion.IA
+        pistas = extractor.llamadas[0]["pistas_heuristicas"]
+        assert pistas is not None
+        assert pistas.hay_pistas is False
