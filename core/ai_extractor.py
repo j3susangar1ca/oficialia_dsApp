@@ -26,6 +26,15 @@ Mejoras incorporadas sobre el adaptador original:
     - `textos_ocr` opcional: referencia textual auxiliar (Tesseract, vía
       `pdf_engine.extraer_texto_ocr`) que se adjunta al turno del usuario
       cuando está disponible, sin afectar el contrato ni el prompt estático.
+    - `pistas_heuristicas` opcional (`core.heuristic_extractor.PistaHeuristica`,
+      fase previa de preprocesamiento por regex que corre `core.pipeline`
+      ANTES de esta llamada): candidatos de numero_oficio/fecha_emision que
+      se adjuntan al turno del usuario explícitamente marcados como NO
+      autoritativos — reducen el trabajo de localización del modelo sin
+      relajar el refuerzo anti-alucinación [2.9] ni sustituir su lectura de
+      la imagen (misma filosofía que `textos_ocr`: apoyo, nunca fuente de
+      verdad). Distinto de `_revisar_heuristicas` (abajo), que audita la
+      SALIDA del modelo, no su entrada.
     - `_revisar_heuristicas`: auditoría de calidad post-validación que deja
       constancia en el log de valores estructuralmente válidos pero
       sospechosos (folio muy corto, fecha fuera de rango plausible,
@@ -41,6 +50,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from core.heuristic_extractor import PistaHeuristica
 from core.models import MetadatosOficio
 from core.pdf_engine import PaginaRenderizada
 
@@ -159,6 +169,7 @@ class ExtractorMetadatos:
         *,
         anio_contexto: int,
         textos_ocr: Optional[dict[int, str]] = None,
+        pistas_heuristicas: Optional[PistaHeuristica] = None,
     ) -> MetadatosOficio:
         """
         Ejecuta la inferencia multimodal sobre las páginas renderizadas.
@@ -168,6 +179,13 @@ class ExtractorMetadatos:
             típicamente de `pdf_engine.extraer_texto_ocr`. Se adjunta al turno del
             usuario como apoyo, nunca como fuente única de verdad (así lo indica
             el propio texto incluido en el prompt del turno).
+        :param pistas_heuristicas: candidatos opcionales de preprocesamiento
+            (`core.heuristic_extractor.extraer_pistas`, invocada por
+            `core.pipeline` ANTES de esta llamada). Se adjuntan al turno del
+            usuario como candidatos explícitamente no autoritativos —el
+            modelo debe confirmarlos o refutarlos contra la imagen, nunca
+            transcribirlos a ciegas—; campos sin candidato (`None`) se
+            omiten del bloque.
         :raises ErrorExtraccionIA: cuando el proveedor no está configurado o
             la respuesta viola el contrato (mapeado del enum original).
         """
@@ -194,7 +212,7 @@ class ExtractorMetadatos:
 
         # Orden de lectura natural (carátula primero).
         ordenadas = sorted(paginas, key=lambda p: p.numero)
-        contenido = self._construir_contenido(ordenadas, anio_contexto, textos_ocr)
+        contenido = self._construir_contenido(ordenadas, anio_contexto, textos_ocr, pistas_heuristicas)
         config = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT_EXTRACCION_OFICIOS,
             temperature=0.0,
@@ -252,9 +270,11 @@ class ExtractorMetadatos:
         paginas: list[PaginaRenderizada],
         anio_contexto: int,
         textos_ocr: Optional[dict[int, str]] = None,
+        pistas_heuristicas: Optional[PistaHeuristica] = None,
     ) -> list:
         """
-        Ensambla el turno multimodal del usuario: contexto textual → (opcional)
+        Ensambla el turno multimodal del usuario: contexto textual →
+        (opcional) pistas heurísticas de preprocesamiento → (opcional)
         referencia OCR → páginas en orden → directiva de cierre (los hints
         viajan aquí, no en el system prompt, para mantenerlo estático y
         cacheable).
@@ -267,6 +287,25 @@ class ExtractorMetadatos:
             f"CONTEXTO TEMPORAL: el año calendario vigente del sistema es {anio_contexto}; "
             "úselo para expandir años de dos dígitos y completar fechas sin año visible.",
         ]
+        if pistas_heuristicas is not None and pistas_heuristicas.hay_pistas:
+            # Candidatos de un preprocesamiento determinista por patrón
+            # (core.heuristic_extractor.extraer_pistas), NO generados por un
+            # modelo. Se presentan como candidatos a confirmar/refutar, no
+            # como respuesta —el refuerzo anti-alucinación [2.9] sigue
+            # aplicando íntegro—: un mismo patrón puede coincidir por
+            # accidente con el folio de control del sello de RECIBIDO en vez
+            # del folio del EMISOR, con una referencia suelta del cuerpo, o
+            # con la fecha de recepción en vez de la de emisión.
+            lineas.append(
+                "PISTAS HEURÍSTICAS DE PREPROCESAMIENTO (candidatos por coincidencia de patrón "
+                "sobre texto plano, NO generados por un modelo, NO autoritativos — confírmelos o "
+                "refútelos contra la imagen; pueden corresponder al sello de recibido, a una "
+                "referencia del cuerpo u otro dato no solicitado, en vez del dato real que se pide):"
+            )
+            if pistas_heuristicas.numero_oficio is not None:
+                lineas.append(f"  - numero_oficio candidato: {pistas_heuristicas.numero_oficio!r}")
+            if pistas_heuristicas.fecha_emision is not None:
+                lineas.append(f"  - fecha_emision candidata: {pistas_heuristicas.fecha_emision!r}")
         if textos_ocr:
             lineas.append(
                 "TEXTO OCR AUXILIAR (referencia de apoyo, puede contener errores de "

@@ -22,6 +22,18 @@ Garantías operativas heredadas:
       la confirmación; un fallo de Sheets no revierte el COMPLETADO.
     - 'Reintentar RPA' reinyecta el documento en ERROR_RPA sin reextraer.
 
+Preprocesamiento heurístico ANTES de la IA (`core.heuristic_extractor.
+extraer_pistas`): sobre la capa de texto embebida del PDF (instantánea,
+sin OCR) o el OCR auxiliar si esa capa está vacía, se localizan por regex
+candidatos de numero_oficio/fecha_emision que viajan al prompt de Gemini
+como pistas explícitamente NO autoritativas (ver
+`core.ai_extractor._construir_contenido`) — reducen el trabajo de
+localización del modelo sin sustituir su lectura de la imagen. Nunca
+aborta la ingesta ni determina el método de extracción: un documento
+extraído con ayuda de estas pistas sigue siendo `MetodoExtraccion.IA`.
+Distinto del respaldo de último recurso (`extraer_heuristico`, invocado
+solo si la IA falla por completo, ver `_extraer_heuristico_respaldo`).
+
 Ejecución asíncrona:
     - `ejecutor_ingesta` (2 hilos): preproceso + extracción IA.
     - `ejecutor_salida` (1 hilo): sesiones RPA serializadas (un navegador
@@ -41,7 +53,7 @@ from typing import Optional
 from config import Configuracion, get_settings
 from core.ai_extractor import ErrorExtraccionIA, ExtractorMetadatos
 from core.file_manager import GestorArchivos, exportar_a_red_smb
-from core.heuristic_extractor import extraer_heuristico
+from core.heuristic_extractor import extraer_heuristico, extraer_pistas
 from core.models import (
     AccionAuditoria,
     DocumentoRegistro,
@@ -171,19 +183,54 @@ class FlujoDocumental:
             paginas = renderizar_paginas(
                 sanitizado, dpi=self.config.render_dpi, max_paginas=self.config.render_max_paginas
             )
-            # Referencia OCR auxiliar (Tesseract): mejora la lectura sin ser
-            # nunca un requisito — se degrada con gracia si la dependencia o
-            # el binario no están instalados (ver core.pdf_engine).
+            # Capa de texto embebida del PDF (instantánea, sin OCR): fuente
+            # preferida para el preprocesamiento heurístico de abajo y,
+            # además, respaldo textual si el documento carece de capa
+            # nativa (fax/escaneo) para cuando SÍ se necesite OCR.
             try:
-                textos_ocr = extraer_texto_ocr(
+                texto_capa = extraer_texto_capa(
                     sanitizado, max_paginas=self.config.render_max_paginas
                 )
-            except Exception:  # noqa: BLE001 — el OCR auxiliar nunca debe abortar la ingesta
-                logger.warning("OCR auxiliar omitido para %s", registro.id, exc_info=True)
+            except Exception:  # noqa: BLE001 — nunca debe abortar la ingesta
+                logger.warning("Extracción de capa de texto omitida para %s", registro.id, exc_info=True)
+                texto_capa = {}
+            # Referencia OCR auxiliar (Tesseract): mejora la lectura sin ser
+            # nunca un requisito — se degrada con gracia si la dependencia o
+            # el binario no están instalados (ver core.pdf_engine). Solo se
+            # invoca si la capa embebida no bastó (PDF de solo imagen): el
+            # OCR es sensiblemente más lento que leer la capa nativa.
+            if texto_capa:
                 textos_ocr = None
+            else:
+                try:
+                    textos_ocr = extraer_texto_ocr(
+                        sanitizado, max_paginas=self.config.render_max_paginas
+                    )
+                except Exception:  # noqa: BLE001 — el OCR auxiliar nunca debe abortar la ingesta
+                    logger.warning("OCR auxiliar omitido para %s", registro.id, exc_info=True)
+                    textos_ocr = None
+
+            # Preprocesamiento heurístico (regex, determinista, instantáneo):
+            # FASE PREVIA a la llamada a Gemini — nunca la sustituye. Sus
+            # candidatos (numero_oficio/fecha_emision) viajan al prompt como
+            # pistas explícitamente no autoritativas (ver
+            # core.ai_extractor._construir_contenido) para reducir el
+            # trabajo de localización del modelo sin relajar el refuerzo
+            # anti-alucinación del prompt institucional.
+            try:
+                pistas_heuristicas = extraer_pistas(
+                    texto_capa or textos_ocr or {}, anio_contexto=datetime.now().year
+                )
+            except Exception:  # noqa: BLE001 — el preprocesamiento nunca debe abortar la ingesta
+                logger.warning("Preprocesamiento heurístico omitido para %s", registro.id, exc_info=True)
+                pistas_heuristicas = None
+
             try:
                 metadatos = self.extractor.extraer_de_paginas(
-                    paginas, anio_contexto=datetime.now().year, textos_ocr=textos_ocr
+                    paginas,
+                    anio_contexto=datetime.now().year,
+                    textos_ocr=textos_ocr,
+                    pistas_heuristicas=pistas_heuristicas,
                 )
                 metodo_extraccion = MetodoExtraccion.IA
             except ErrorExtraccionIA as exc:
@@ -195,7 +242,7 @@ class FlujoDocumental:
                 # del proveedor NO se intenta sortear (ver _extraer_heuristico_respaldo).
                 metadatos = None
                 if exc.codigo != "CONTENIDO_BLOQUEADO_SEGURIDAD":
-                    metadatos = self._extraer_heuristico_respaldo(registro, sanitizado, textos_ocr, exc)
+                    metadatos = self._extraer_heuristico_respaldo(registro, texto_capa, textos_ocr, exc)
                 if metadatos is None:
                     raise  # conserva el comportamiento original: DESCARTADO + cuarentena
                 metodo_extraccion = MetodoExtraccion.HEURISTICA_FALLBACK
@@ -223,20 +270,20 @@ class FlujoDocumental:
     def _extraer_heuristico_respaldo(
         self,
         registro: DocumentoRegistro,
-        sanitizado: bytes,
+        texto_capa: dict[int, str],
         textos_ocr: Optional[dict[int, str]],
         causa_original: ErrorExtraccionIA,
     ) -> Optional[MetadatosOficio]:
         """
         Último recurso cuando la IA falla: intenta rescatar número de oficio
         y fecha por regex (core.heuristic_extractor) sobre la capa de texto
-        embebida del PDF, o el OCR auxiliar si esa capa está vacía (fax /
-        escaneo sin texto). Devuelve None —y el pipeline conserva el
-        comportamiento original (DESCARTADO + cuarentena)— si tampoco hay
-        texto disponible o la propia heurística falla; nunca lanza.
+        embebida del PDF (ya extraída más arriba para el preprocesamiento),
+        o el OCR auxiliar si esa capa está vacía (fax / escaneo sin texto).
+        Devuelve None —y el pipeline conserva el comportamiento original
+        (DESCARTADO + cuarentena)— si tampoco hay texto disponible o la
+        propia heurística falla; nunca lanza.
         """
         try:
-            texto_capa = extraer_texto_capa(sanitizado, max_paginas=self.config.render_max_paginas)
             texto_disponible = texto_capa or textos_ocr or {}
             metadatos = extraer_heuristico(texto_disponible, anio_contexto=datetime.now().year)
             logger.warning(
