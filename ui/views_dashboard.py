@@ -51,7 +51,7 @@ import logging
 import time
 from datetime import datetime
 
-from nicegui import run, ui
+from nicegui import app, run, ui
 
 from core.models import GRUPOS_BANDEJA, MetodoExtraccion, OrigenIngesta, meta_estado
 from ui.layout import (
@@ -154,7 +154,15 @@ def _fila_de_tabla(documento) -> dict:
 def pagina_bandeja() -> None:
     """Bandeja de entrada + carga manual."""
     aplicar_tema()
-    revisor: dict = {"valor": ""}
+    # app.storage.user (no un dict local): persiste por navegador entre la
+    # bandeja y la revisión HITL — antes cada @ui.page arrancaba con
+    # {"valor": ""} y el revisor debía retiparse al entrar a cada oficio.
+    # OJO: en un navegador nuevo la clave "valor" todavía no existe —
+    # setdefault() la deja en "" antes de que cualquier código de más abajo
+    # haga revisor["valor"] (acceso directo, no .get()), igual que antes
+    # garantizaba el dict local literal {"valor": ""}.
+    revisor = app.storage.user
+    revisor.setdefault("valor", "")
     config = obtener_config()
     # fecha_desde/fecha_hasta ya deben existir aquí: _calcular_filas() (más
     # abajo) los lee antes de que los ui.input del rango de fechas alcancen

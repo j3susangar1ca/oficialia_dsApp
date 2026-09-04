@@ -119,7 +119,10 @@ def encabezado(revisor_ref: dict) -> None:
     Barra superior: identidad institucional (HCG · Oficialía Digital) +
     indicador de monitoreo en vivo + campo del revisor en turno.
 
-    :param revisor_ref: dict reactivo {'valor': str} compartido con las vistas.
+    :param revisor_ref: dict reactivo {'valor': str} compartido con las vistas
+        — en la práctica siempre `app.storage.user` (persiste por navegador
+        entre páginas), nunca un dict local; el tipado se deja genérico
+        porque cualquier mapeo con esa forma funciona (p. ej. en pruebas).
     """
     with ui.header().classes(
         "items-center justify-between px-5 py-2.5 bg-white no-wrap"
