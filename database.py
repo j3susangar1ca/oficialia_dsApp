@@ -26,6 +26,7 @@ from typing import Iterator, Optional, Sequence
 from core.models import (
     AccionAuditoria,
     DocumentoRegistro,
+    EstadoBloqueo,
     EstadoDocumento,
     EstadoSheets,
     InfoPreproceso,
@@ -34,6 +35,7 @@ from core.models import (
     OrigenIngesta,
     RegistroAuditoria,
     ResultadoRpa,
+    ahora_mas_minutos_utc_iso,
     ahora_utc_iso,
 )
 from config import Configuracion, get_settings
@@ -72,7 +74,16 @@ CREATE TABLE IF NOT EXISTS documentos (
     updated_at               TEXT NOT NULL,
     version                  INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
     extraccion_metodo        TEXT NOT NULL DEFAULT 'IA'
-        CHECK (extraccion_metodo IN ('IA', 'HEURISTICA_FALLBACK', 'HITL'))
+        CHECK (extraccion_metodo IN ('IA', 'HEURISTICA_FALLBACK', 'HITL')),
+    -- Bloqueo de edición concurrente en la revisión HITL (ver
+    -- RepositorioDocumentos.adquirir_bloqueo/renovar_bloqueo/liberar_bloqueo):
+    -- deliberadamente SIN CHECK ni FK — es efímero (vence solo) y ortogonal
+    -- a `version` (la concurrencia optimista de escritura sigue siendo la
+    -- garantía de fondo; este bloqueo es solo una advertencia temprana en
+    -- la UI, no reemplaza esa protección).
+    locked_by                TEXT,
+    locked_at                TEXT,
+    lock_expires_at          TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_documentos_numero_oficio ON documentos(numero_oficio);
@@ -150,9 +161,23 @@ def _migracion_1_a_2(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_auditoria_documento ON auditoria_hitl(documento_id, fecha)")
 
 
+def _migracion_2_a_3(conn: sqlite3.Connection) -> None:
+    """
+    v2 → v3: agrega `locked_by`/`locked_at`/`lock_expires_at` a `documentos`
+    — bloqueo de edición concurrente en la revisión HITL (ver
+    RepositorioDocumentos.adquirir_bloqueo). Deliberadamente sin CHECK ni
+    valor por defecto: es efímero, vence solo, y no participa de la
+    concurrencia optimista por `version` (ver comentario en ESQUEMA_SQL).
+    """
+    columnas = {fila["name"] for fila in conn.execute("PRAGMA table_info(documentos)")}
+    for columna in ("locked_by", "locked_at", "lock_expires_at"):
+        if columna not in columnas:
+            conn.execute(f"ALTER TABLE documentos ADD COLUMN {columna} TEXT")
+
+
 #: Migraciones en orden: `_MIGRACIONES[N]` lleva de la versión N a la N+1.
 #: `VERSION_ESQUEMA` (= len(_MIGRACIONES)) es la versión objetivo actual.
-_MIGRACIONES: list = [_migracion_0_a_1, _migracion_1_a_2]
+_MIGRACIONES: list = [_migracion_0_a_1, _migracion_1_a_2, _migracion_2_a_3]
 VERSION_ESQUEMA: int = len(_MIGRACIONES)
 
 
@@ -479,6 +504,75 @@ class RepositorioDocumentos:
         registro = self.obtener(doc_id)
         assert registro is not None
         return registro
+
+    # ------------------------------------------------------------------
+    # Bloqueo de edición concurrente (revisión HITL)
+    # ------------------------------------------------------------------
+    # Deliberadamente NO tocan `version` ni `updated_at`: es un estado
+    # efímero (advertencia temprana en la UI para que dos revisores no
+    # editen el mismo oficio a la vez sin saberlo), ortogonal a la
+    # concurrencia optimista de escritura — ver comentario en ESQUEMA_SQL
+    # y core.models.EstadoBloqueo. Un heartbeat cada pocos segundos
+    # (renovar_bloqueo) NO debe competir por `version` con una escritura de
+    # contenido real que pudiera estar en vuelo.
+
+    def adquirir_bloqueo(self, doc_id: str, usuario: str, *, ttl_minutos: int) -> EstadoBloqueo:
+        """
+        Bloquea `doc_id` para `usuario` de forma atómica si está libre,
+        vencido, o ya lo tenía el mismo usuario (reentrante — reabrir la
+        misma pestaña no debe autobloquearse). Un UPDATE de una sola
+        sentencia con la condición en el WHERE evita la carrera
+        leer-luego-escribir entre dos revisores que abren el documento casi
+        al mismo tiempo.
+        """
+        ahora = ahora_utc_iso()
+        expira = ahora_mas_minutos_utc_iso(ttl_minutos)
+        with self._conexion() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE documentos
+                   SET locked_by = ?, locked_at = ?, lock_expires_at = ?
+                 WHERE id = ?
+                   AND (lock_expires_at IS NULL OR lock_expires_at < ? OR locked_by = ?)
+                """,
+                (usuario, ahora, expira, doc_id, ahora, usuario),
+            )
+            if cursor.rowcount > 0:
+                return EstadoBloqueo(adquirido=True)
+            fila = conn.execute("SELECT locked_by FROM documentos WHERE id = ?", (doc_id,)).fetchone()
+        return EstadoBloqueo(adquirido=False, poseido_por=fila["locked_by"] if fila else None)
+
+    def renovar_bloqueo(self, doc_id: str, usuario: str, *, ttl_minutos: int) -> bool:
+        """Heartbeat: extiende el vencimiento mientras la pantalla de
+        revisión siga abierta. No renueva un bloqueo ya vencido (pudo
+        haberlo tomado alguien más entretanto) ni el de otro usuario."""
+        ahora = ahora_utc_iso()
+        expira = ahora_mas_minutos_utc_iso(ttl_minutos)
+        with self._conexion() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE documentos
+                   SET lock_expires_at = ?
+                 WHERE id = ? AND locked_by = ? AND lock_expires_at >= ?
+                """,
+                (expira, doc_id, usuario, ahora),
+            )
+            return cursor.rowcount > 0
+
+    def liberar_bloqueo(self, doc_id: str, usuario: str) -> bool:
+        """Libera el bloqueo — al confirmar/descartar, o al salir de la
+        pantalla de revisión (ver Client.on_disconnect en ui.views_hitl).
+        Solo libera el bloqueo del propio `usuario` (nunca el de otro)."""
+        with self._conexion() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE documentos
+                   SET locked_by = NULL, locked_at = NULL, lock_expires_at = NULL
+                 WHERE id = ? AND locked_by = ?
+                """,
+                (doc_id, usuario),
+            )
+            return cursor.rowcount > 0
 
     # ------------------------------------------------------------------
     # Lecturas

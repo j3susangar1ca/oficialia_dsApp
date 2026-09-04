@@ -6,6 +6,7 @@ migraciones de esquema y el buscador de la bandeja.
 from __future__ import annotations
 
 import sqlite3
+import time
 import uuid
 
 import pytest
@@ -178,6 +179,7 @@ class TestMigracionEsquema:
             assert conn2.execute("PRAGMA user_version").fetchone()[0] == VERSION_ESQUEMA
             columnas = {f[1] for f in conn2.execute("PRAGMA table_info(documentos)")}
             assert "extraccion_metodo" in columnas
+            assert {"locked_by", "locked_at", "lock_expires_at"} <= columnas
         finally:
             conn2.close()
 
@@ -190,3 +192,98 @@ class TestMigracionEsquema:
         """Llamar inicializar() más de una vez (reinicios de la app) no debe fallar."""
         repositorio.inicializar()
         repositorio.inicializar()
+
+
+class TestBloqueoConcurrente:
+    """RepositorioDocumentos.adquirir_bloqueo/renovar_bloqueo/liberar_bloqueo
+    — advertencia temprana en la UI (ver core.models.EstadoBloqueo) para que
+    dos revisores no editen el mismo oficio a la vez sin saberlo; NO es la
+    garantía de concurrencia de fondo (esa sigue siendo `version`)."""
+
+    def test_adquirir_libre_devuelve_adquirido(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        resultado = repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=3)
+        assert resultado.adquirido is True
+        assert resultado.poseido_por is None
+
+    def test_adquirir_ya_tomado_por_otro_falla_y_reporta_quien(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=3)
+
+        resultado = repositorio.adquirir_bloqueo(doc.id, "beto", ttl_minutos=3)
+
+        assert resultado.adquirido is False
+        assert resultado.poseido_por == "ana"
+
+    def test_adquirir_es_reentrante_para_el_mismo_usuario(self, repositorio: RepositorioDocumentos):
+        """Reabrir la misma pestaña (el mismo revisor) no debe autobloquearse."""
+        doc = repositorio.crear(_documento())
+        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=3)
+
+        resultado = repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=3)
+
+        assert resultado.adquirido is True
+
+    def test_adquirir_tras_vencer_lo_toma_otro_usuario(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=0.001)  # ~60 ms
+        time.sleep(0.15)
+
+        resultado = repositorio.adquirir_bloqueo(doc.id, "beto", ttl_minutos=3)
+
+        assert resultado.adquirido is True
+
+    def test_renovar_extiende_el_vencimiento(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=0.001)
+        assert repositorio.renovar_bloqueo(doc.id, "ana", ttl_minutos=3) is True
+        time.sleep(0.15)
+
+        # Sin la renovación ya habría vencido; con ella, "beto" NO puede tomarlo.
+        resultado = repositorio.adquirir_bloqueo(doc.id, "beto", ttl_minutos=3)
+
+        assert resultado.adquirido is False
+
+    def test_renovar_de_otro_usuario_falla(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=3)
+
+        assert repositorio.renovar_bloqueo(doc.id, "beto", ttl_minutos=3) is False
+
+    def test_renovar_ya_vencido_falla(self, repositorio: RepositorioDocumentos):
+        """No renueva un bloqueo ya vencido: pudo haberlo tomado otro
+        revisor entretanto (ver docstring de renovar_bloqueo)."""
+        doc = repositorio.crear(_documento())
+        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=0.001)
+        time.sleep(0.15)
+
+        assert repositorio.renovar_bloqueo(doc.id, "ana", ttl_minutos=3) is False
+
+    def test_liberar_permite_que_otro_adquiera(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=3)
+
+        assert repositorio.liberar_bloqueo(doc.id, "ana") is True
+        resultado = repositorio.adquirir_bloqueo(doc.id, "beto", ttl_minutos=3)
+
+        assert resultado.adquirido is True
+
+    def test_liberar_de_otro_usuario_no_hace_nada(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=3)
+
+        assert repositorio.liberar_bloqueo(doc.id, "beto") is False
+        resultado = repositorio.adquirir_bloqueo(doc.id, "beto", ttl_minutos=3)
+        assert resultado.adquirido is False  # sigue siendo de "ana"
+
+    def test_bloqueo_no_afecta_version_de_contenido(self, repositorio: RepositorioDocumentos):
+        """El bloqueo es ortogonal a la concurrencia optimista de escritura:
+        adquirir/renovar/liberar NUNCA deben tocar `version`."""
+        doc = repositorio.crear(_documento())
+        version_original = doc.version
+
+        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=3)
+        repositorio.renovar_bloqueo(doc.id, "ana", ttl_minutos=3)
+        repositorio.liberar_bloqueo(doc.id, "ana")
+
+        assert repositorio.obtener(doc.id).version == version_original

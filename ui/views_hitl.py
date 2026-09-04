@@ -27,9 +27,16 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
-from nicegui import run, ui
+from nicegui import app, run, ui
 
-from core.models import DocumentoRegistro, EstadoDocumento, MetadatosOficio, MetodoExtraccion, meta_estado
+from core.models import (
+    DocumentoRegistro,
+    EstadoBloqueo,
+    EstadoDocumento,
+    MetadatosOficio,
+    MetodoExtraccion,
+    meta_estado,
+)
 from ui.layout import (
     REVISOR_POR_DEFECTO,
     aplicar_tema,
@@ -89,7 +96,12 @@ def _validar_asunto(valor: str) -> Optional[str]:
 def pagina_revision(doc_id: str) -> None:
     """Split-screen: visor de PDF (izquierda) + formulario HITL (derecha)."""
     aplicar_tema()
-    revisor: dict = {"valor": ""}
+    # app.storage.user: mismo revisor que ya escribió en la bandeja, sin
+    # retiparlo (ver pagina_bandeja) — y la identidad estable que ata el
+    # bloqueo de edición concurrente más abajo. setdefault: en un navegador
+    # nuevo "valor" no existe todavía (ver la misma nota en pagina_bandeja).
+    revisor = app.storage.user
+    revisor.setdefault("valor", "")
     pipeline = obtener_pipeline()
     config = obtener_config()
 
@@ -102,6 +114,41 @@ def pagina_revision(doc_id: str) -> None:
 
     borrador = _precargar_borrador(documento)
     estado_visto: dict = {"estado": documento.estado}
+
+    # ---------------- Bloqueo de edición concurrente ----------------
+    # Solo tiene sentido intentarlo en estados editables: un documento ya
+    # COMPLETADO/DESCARTADO/en RPA es de solo lectura de todas formas, sin
+    # necesidad de bloqueo. Se captura `nombre_revisor_bloqueo` UNA vez
+    # aquí (no se re-deriva de revisor["valor"] en cada acción): si el
+    # revisor cambia el nombre en el encabezado a media revisión, liberar/
+    # renovar debe seguir usando la MISMA identidad con la que se adquirió
+    # — RepositorioDocumentos.liberar_bloqueo exige que coincida.
+    bloqueo: Optional[EstadoBloqueo] = None
+    nombre_revisor_bloqueo: Optional[str] = None
+    if documento.estado in ESTADOS_EDITABLES:
+        nombre_revisor_bloqueo = revisor["valor"].strip() or REVISOR_POR_DEFECTO
+        bloqueo = pipeline.repo.adquirir_bloqueo(
+            doc_id, nombre_revisor_bloqueo, ttl_minutos=config.hitl_lock_ttl_min
+        )
+        if bloqueo.adquirido:
+            # Heartbeat: bien por debajo del TTL para tolerar latencia de
+            # red sin que el bloqueo venza mientras la pantalla sigue
+            # abierta y en uso.
+            intervalo_heartbeat = max(5.0, min(30.0, config.hitl_lock_ttl_min * 60 / 2))
+            ui.timer(
+                intervalo_heartbeat,
+                lambda: pipeline.repo.renovar_bloqueo(
+                    doc_id, nombre_revisor_bloqueo, ttl_minutos=config.hitl_lock_ttl_min
+                ),
+            )
+            # Cierre de pestaña, navegación fuera de la página o pérdida de
+            # conexión: red de seguridad además de la liberación explícita
+            # en _confirmar()/_confirmar_descarte() (ver _panel_formulario)
+            # — para cuando el revisor simplemente se va sin confirmar ni
+            # descartar.
+            ui.context.client.on_disconnect(
+                lambda: pipeline.repo.liberar_bloqueo(doc_id, nombre_revisor_bloqueo)
+            )
 
     # El encabezado es un layout de primer nivel (fuera del contenedor).
     encabezado(revisor)
@@ -150,7 +197,8 @@ def pagina_revision(doc_id: str) -> None:
             # ==== PANEL DERECHO: formulario + acciones ====
             with split.after:
                 acciones = _panel_formulario(
-                    documento, borrador, revisor, estado_visto, pipeline, config
+                    documento, borrador, revisor, estado_visto, pipeline, config,
+                    bloqueo, nombre_revisor_bloqueo,
                 )
 
     async def _atajo_revision(evento) -> None:
@@ -233,9 +281,21 @@ def _panel_formulario(
     estado_visto: dict,
     pipeline,
     config,
+    bloqueo: Optional[EstadoBloqueo] = None,
+    nombre_revisor_bloqueo: Optional[str] = None,
 ) -> dict[str, Callable]:
-    editable = documento.estado in ESTADOS_EDITABLES
+    # bloqueo es None cuando el estado no es editable en primer lugar (ver
+    # pagina_revision: ahí ni se intenta adquirir) — en ese caso el propio
+    # estado ya decide "no editable" sin que el bloqueo lo afecte más.
+    editable = documento.estado in ESTADOS_EDITABLES and (bloqueo is None or bloqueo.adquirido)
     entradas: dict[str, ui.input] = {}
+
+    def _liberar_bloqueo_propio() -> None:
+        """Libera el bloqueo de inmediato al confirmar/descartar (además
+        del Client.on_disconnect en pagina_revision, que cubre salir sin
+        confirmar ni descartar)."""
+        if nombre_revisor_bloqueo is not None:
+            pipeline.repo.liberar_bloqueo(documento.id, nombre_revisor_bloqueo)
 
     def _campo(
         clave: str,
@@ -283,6 +343,8 @@ def _panel_formulario(
         with ui.column().classes("w-full q-pa-md gap-3 max-w-2xl mx-auto"):
 
             # ---- Banners de contexto por estado ----
+            if bloqueo is not None and not bloqueo.adquirido:
+                _banner_bloqueo_ajeno(bloqueo)
             _banner_estado(documento)
             _banner_extraccion_heuristica(documento)
 
@@ -328,7 +390,7 @@ def _panel_formulario(
                         "color=primary outline no-caps"
                     ).on_click(lambda: _reintentar_rpa())
 
-                if documento.estado in ESTADOS_EDITABLES:
+                if editable:
                     ui.button("Descartar", icon="delete").props(
                         "color=negative outline no-caps"
                     ).on_click(lambda: _abrir_dialogo_descartar()).tooltip("Alt+R")
@@ -337,7 +399,10 @@ def _panel_formulario(
                         "color=primary no-caps"
                     ).on_click(lambda: _confirmar()).tooltip("Alt+A")
 
-            if not editable:
+            if not editable and (bloqueo is None or bloqueo.adquirido):
+                # Si no es editable POR EL BLOQUEO, el banner de arriba ya
+                # lo explica con quién y por qué — repetir el mensaje aquí
+                # sería redundante.
                 ui.label(
                     "Formulario de solo lectura: el documento no está en revisión pendiente."
                 ).classes("text-[11px] text-slate-400")
@@ -378,6 +443,7 @@ def _panel_formulario(
             ui.notify(f"No se pudo confirmar: {exc}", type="negative", position="top")
             return
 
+        _liberar_bloqueo_propio()
         ui.notify(
             f"Registrado: {documento_actualizado.nombre_archivo_canonico}. RPA en ejecución…",
             type="positive",
@@ -415,6 +481,7 @@ def _panel_formulario(
             logger.exception("Fallo al descartar %s", documento.id)
             ui.notify(f"No se pudo descartar: {exc}", type="negative", position="top")
             return
+        _liberar_bloqueo_propio()
         ui.notify("Documento descartado y archivado en 04_errores.", type="warning", position="top")
         ui.navigate.to("/")
 
@@ -431,7 +498,7 @@ def _panel_formulario(
         ui.navigate.to(f"/revision/{documento.id}")
 
     acciones: dict[str, Callable] = {}
-    if documento.estado in ESTADOS_EDITABLES:
+    if editable:
         acciones = {"aprobar": _confirmar, "rechazar": _abrir_dialogo_descartar}
     return acciones
 
@@ -483,6 +550,29 @@ def _panel_auditoria(documento: DocumentoRegistro, pipeline) -> None:
 # ----------------------------------------------------------------------
 # Banners de contexto
 # ----------------------------------------------------------------------
+def _banner_bloqueo_ajeno(bloqueo: EstadoBloqueo) -> None:
+    """
+    Otro revisor tiene este documento abierto para editar AHORA MISMO (ver
+    RepositorioDocumentos.adquirir_bloqueo) — no un error, solo una
+    advertencia temprana para que dos personas no editen el mismo oficio a
+    la vez sin saberlo y una termine sobrescribiendo el trabajo de la otra.
+    El formulario queda de solo lectura (ver `editable` en
+    _panel_formulario) hasta que esa persona libere el bloqueo (confirma,
+    descarta o cierra la pestaña) o venza por inactividad.
+    """
+    with ui.card().classes("bg-amber-50 border-l-4 border-amber-400 w-full shadow-none rounded-lg gap-2"):
+        ui.icon("lock", color="amber-9").classes("text-xl")
+        with ui.column().classes("gap-0"):
+            ui.label(f"En revisión por {bloqueo.poseido_por}").classes(
+                "text-sm font-semibold text-amber-900"
+            )
+            ui.label(
+                "Alguien más tiene este documento abierto para editar ahora mismo. Puede "
+                "consultarlo en modo lectura; si esa persona cierra la pantalla o pasan unos "
+                "minutos sin actividad, el bloqueo se libera solo y podrá volver a intentarlo."
+            ).classes("text-xs text-amber-800")
+
+
 def _banner_extraccion_heuristica(documento: DocumentoRegistro) -> None:
     """
     Advertencia imposible de pasar por alto cuando el formulario NO viene

@@ -21,7 +21,7 @@ normalización heredadas del esquema Zod:
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Literal, Optional
 
@@ -35,6 +35,20 @@ PATRON_FECHA_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 def ahora_utc_iso() -> str:
     """Marca de tiempo ISO 8601 UTC con milisegundos (formato original)."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def ahora_mas_minutos_utc_iso(minutos: int) -> str:
+    """Igual formato que `ahora_utc_iso()`, desplazado `minutos` al futuro.
+
+    Usada para vencimientos de bloqueo (ver
+    `RepositorioDocumentos.adquirir_bloqueo`/`renovar_bloqueo`): debe
+    producir el MISMO formato que `ahora_utc_iso()` para que comparar
+    `lock_expires_at` contra "ahora" con operadores de cadena en SQL
+    (`<`, `<=`) siga siendo lexicográficamente correcto — igual que ya se
+    hace con `fecha_ingesta` en `RepositorioDocumentos.listar`.
+    """
+    momento = datetime.now(timezone.utc) + timedelta(minutes=minutos)
+    return momento.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 # ======================================================================
@@ -376,6 +390,20 @@ GRUPOS_BANDEJA: list[GrupoBandeja] = [
     GrupoBandeja(id="errores", etiqueta="Errores RPA", estados=frozenset(ESTADOS_ERROR | {EstadoDocumento.DESCARTADO})),
     GrupoBandeja(id="completados", etiqueta="Completados", estados=frozenset({EstadoDocumento.COMPLETADO})),
 ]
+
+
+class EstadoBloqueo(BaseModel):
+    """
+    Resultado de un intento de bloqueo de edición concurrente (ver
+    `RepositorioDocumentos.adquirir_bloqueo`). Un "bloqueo" aquí es una
+    advertencia temprana en la UI (evita que dos revisores editen el mismo
+    oficio a la vez sin saberlo) — NO reemplaza la concurrencia optimista
+    por `version` de `documentos`, que sigue siendo la garantía real contra
+    escrituras perdidas ante cualquier condición de carrera residual.
+    """
+    adquirido: bool
+    #: Quién lo tiene actualmente, cuando `adquirido` es False.
+    poseido_por: Optional[str] = None
 
 
 def nombre_archivo_canonico(metadatos: MetadatosOficio) -> str:

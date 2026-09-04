@@ -21,6 +21,10 @@ data/tablero_local.csv
 data/sheets_backup.csv
 logs/
 
+# Almacenamiento de sesión de NiceGUI (app.storage.user — un .json por
+# navegador que abrió la app; ver config.storage_secret)
+.nicegui/
+
 # Pruebas
 .pytest_cache/
 

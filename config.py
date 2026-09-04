@@ -145,6 +145,20 @@ class Configuracion(BaseSettings):
     app_port: int = 8080                # Puerto de la interfaz web
     app_titulo: str = "Oficialía Digital DSA"
     max_upload_bytes: int = 25 * 1024 * 1024   # 25 MB por oficio (límite original)
+    # Firma del almacenamiento de sesión de NiceGUI (app.storage.user): sin
+    # esto, "Revisor en turno" no puede persistir entre la bandeja y la
+    # revisión HITL (cada @ui.page arrancaba con un dict local vacío) — ver
+    # ui.layout.encabezado. No protege ningún límite de seguridad real (LAN
+    # departamental, sin autenticación); solo identifica navegadores que
+    # regresan para que el bloqueo de edición concurrente (ver
+    # hitl_lock_ttl_min) tenga una identidad de revisor estable a la que
+    # atarse. Cambiarlo invalida las sesiones de navegador ya abiertas.
+    storage_secret: str = "oficialia-dsa-storage-secret-cambiar-en-produccion"
+    # Minutos que un revisor retiene el bloqueo de edición de un documento
+    # en PENDIENTE_REVISION antes de considerarse abandonado (pestaña
+    # cerrada sin confirmar/descartar, conexión perdida). Se renueva por
+    # heartbeat mientras la pantalla de revisión permanece abierta.
+    hitl_lock_ttl_min: int = 3
 
     # ------------------------------------------------------------------
     # Persistencia (SQLite en modo WAL + rutas de storage)

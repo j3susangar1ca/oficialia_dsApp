@@ -171,4 +171,10 @@ ui.run(
     # bandeja mostraba "Records per page:" / "1-3 of 3" pese a que el resto
     # de la interfaz está en español.
     language="es",
+    # Habilita app.storage.user (identidad de "Revisor en turno" persistente
+    # entre la bandeja y la revisión HITL, y base del bloqueo de edición
+    # concurrente — ver ui.layout.encabezado y RepositorioDocumentos.
+    # adquirir_bloqueo). Sin storage_secret, app.storage.user lanza en
+    # tiempo de ejecución.
+    storage_secret=configuracion.storage_secret,
 )
