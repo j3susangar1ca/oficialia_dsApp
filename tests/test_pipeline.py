@@ -163,3 +163,32 @@ class TestPreprocesamientoHeuristicoPreviaALaIA:
         pistas = extractor.llamadas[0]["pistas_heuristicas"]
         assert pistas is not None
         assert pistas.hay_pistas is False
+
+
+class TestVerificarDuplicado:
+    """Chequeo síncrono previo a encolar (ver ui.views_dashboard._manejar_carga):
+    programar_ingesta() es fire-and-forget, así que este es el único punto
+    donde la UI puede avisar de un duplicado ANTES de que se pierda en el
+    hilo de fondo (ver docstring de FlujoDocumental.verificar_duplicado)."""
+
+    def test_sin_duplicado_devuelve_none(self, flujo):
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
+        assert pipeline.verificar_duplicado(_pdf_con_oficio()) is None
+
+    def test_duplicado_devuelve_el_registro_existente(self, flujo):
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
+        contenido = _pdf_con_oficio()
+        original = pipeline.ingestar_y_procesar("oficio.pdf", OrigenIngesta.WEB_DRAG_DROP, contenido)
+
+        encontrado = pipeline.verificar_duplicado(contenido)
+
+        assert encontrado is not None
+        assert encontrado.id == original.id
+        assert encontrado.nombre_archivo_original == "oficio.pdf"
+
+    def test_no_encola_ni_dispara_ingestar_y_procesar(self, flujo):
+        """El chequeo debe ser de solo lectura: no debe crear ningún
+        registro por sí mismo, sea o no duplicado."""
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
+        pipeline.verificar_duplicado(_pdf_con_oficio())
+        assert pipeline.repo.listar() == []

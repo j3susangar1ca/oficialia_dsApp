@@ -79,12 +79,21 @@ logger = logging.getLogger("oficialia.pipeline")
 
 
 class DocumentoDuplicado(Exception):
-    """El SHA-256 ya existe en la base (deduplicación atómica)."""
+    """El SHA-256 ya existe en la base (deduplicación atómica).
+
+    Transporta el registro EXISTENTE completo (no solo su id) para que el
+    llamador (típicamente la UI) pueda ofrecerle al revisor una acción
+    concreta —ver el documento ya registrado— en vez de solo informar un
+    hash truncado sin contexto.
+    """
 
     def __init__(self, existente: DocumentoRegistro, sha256: str) -> None:
         self.existente = existente
         self.sha256 = sha256
-        super().__init__(f"Documento duplicado detectado con hash {sha256} (id {existente.id})")
+        super().__init__(
+            f"Ya existe como «{existente.nombre_archivo_original}» "
+            f"(estado: {existente.estado.value}, id {existente.id}, hash {sha256[:12]}…)"
+        )
 
 
 @dataclass
@@ -125,6 +134,27 @@ class FlujoDocumental:
     # ------------------------------------------------------------------
     # Flujo 1 — Ingesta, preprocesamiento y extracción IA
     # ------------------------------------------------------------------
+    def verificar_duplicado(self, contenido: bytes) -> Optional[DocumentoRegistro]:
+        """
+        Chequeo síncrono y barato (hash + lectura SQLite, sin tocar disco
+        ni la cola de fondo) para que el llamador (la UI) pueda avisar del
+        duplicado ANTES de encolar la ingesta — ver `programar_ingesta`:
+        el chequeo equivalente de ahí corre en el hilo de fondo, cuyo
+        resultado nadie recoge (`ThreadPoolExecutor.submit` sin `.result()`
+        descarta cualquier excepción de forma silenciosa), así que hasta
+        ahora un duplicado subido por WEB nunca llegaba a mostrarse en la
+        interfaz pese a detectarse y registrarse correctamente en el log.
+
+        Sigue existiendo una ventana de carrera minúscula entre esta
+        llamada y la inserción real (dos subidas casi simultáneas del
+        mismo archivo, o una carrera con el canal SCANNER_ADF): para ESO
+        sigue existiendo la restricción UNIQUE + `DocumentoDuplicado` de
+        `ingestar_y_procesar`, que seguirá aplicando como red de
+        seguridad aunque ese caso ya no tenga aviso en la UI (solo en el
+        log) — es la misma situación de siempre, no una regresión.
+        """
+        return self.repo.obtener_por_hash(calcular_sha256(contenido))
+
     def programar_ingesta(self, nombre: str, origen: OrigenIngesta, contenido: bytes) -> None:
         """Encola la ingesta completa en segundo plano (fire-and-forget)."""
         self.ejecutor_ingesta.submit(self.ingestar_y_procesar, nombre, origen, contenido)

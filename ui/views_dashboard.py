@@ -54,7 +54,6 @@ from datetime import datetime
 from nicegui import run, ui
 
 from core.models import GRUPOS_BANDEJA, MetodoExtraccion, OrigenIngesta, meta_estado
-from core.pipeline import DocumentoDuplicado
 from ui.layout import (
     REVISOR_POR_DEFECTO,
     aplicar_tema,
@@ -506,6 +505,27 @@ def pagina_bandeja() -> None:
             ui.notify(f"'{nombre}' llegó vacío; se ignora.", type="warning", position="top")
             return
 
+        # OJO: verificar_duplicado() se llama ANTES de encolar, NO dentro
+        # de un try/except alrededor de programar_ingesta(). programar_
+        # ingesta() es fire-and-forget (ThreadPoolExecutor.submit sin
+        # .result()): si DocumentoDuplicado se lanza allá dentro, en el
+        # hilo de fondo, esa excepción no tiene forma de llegar hasta acá
+        # — un except aquí alrededor de programar_ingesta() nunca se
+        # dispara (verificado en navegador: subir el mismo archivo dos
+        # veces mostraba igual el toast de éxito). Este chequeo síncrono
+        # y barato (hash + lectura SQLite) es lo que sí puede avisar en la
+        # UI; el chequeo de ingestar_y_procesar() sigue como red de
+        # seguridad para la carrera minúscula entre ambos (ver
+        # FlujoDocumental.verificar_duplicado).
+        try:
+            duplicado = pipeline.verificar_duplicado(contenido)
+        except Exception:  # noqa: BLE001 — el chequeo nunca debe bloquear la carga
+            logger.exception("Fallo verificando duplicado de %s; se continúa con la carga", nombre)
+            duplicado = None
+        if duplicado is not None:
+            _mostrar_dialogo_duplicado(nombre, duplicado)
+            return
+
         try:
             pipeline.programar_ingesta(nombre, OrigenIngesta.WEB_DRAG_DROP, contenido)
             ui.notify(
@@ -514,14 +534,46 @@ def pagina_bandeja() -> None:
                 position="top",
             )
             _cambiar_grupo("en_proceso")
-        except DocumentoDuplicado as exc:  # teórico: se lanza en el hilo de fondo
-            # El pipeline ya deduplica por hash/nombre; aquí solo se informa
-            # el resultado (ver backlog de UI: aún no hay un diálogo de
-            # "reemplazar / versionar / cancelar" para colisiones de nombre).
-            ui.notify(f"Documento duplicado: {exc}", type="warning", position="top")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fallo al encolar la carga de %s", nombre)
             ui.notify(f"No se pudo recibir '{nombre}': {exc}", type="negative", position="top")
+
+    def _mostrar_dialogo_duplicado(nombre_subido: str, existente) -> None:
+        """Diálogo (no un ui.notify de solo texto): ui.notify serializa un
+        payload JSON sin bridging a Python, así que no puede llevar un botón
+        con acción real — un diálogo sí, y es la única forma de ofrecer
+        aquí una acción de un clic en vez de una notificación pasiva.
+
+        "Sobrescribir"/"Crear nueva versión" quedan fuera a propósito: el
+        esquema no tiene noción de versión de documento y sobrescribir un
+        registro con posible validez legal/RPA ya ejecutado es una
+        decisión de producto, no de UI — la acción real disponible hoy es
+        ver el documento existente.
+        """
+        info = meta_estado(existente.estado)
+        with ui.dialog() as dialogo, ui.card().classes("gap-3 q-pa-md max-w-sm rounded-xl"):
+            with ui.row().classes("items-center gap-2 no-wrap"):
+                ui.icon("content_copy", size="20px").classes("text-amber-600")
+                ui.label("Documento ya registrado").classes("text-sm font-semibold text-slate-700")
+            ui.label(
+                f"«{nombre_subido}» tiene el mismo contenido que un documento que ya está en el "
+                "sistema; no se creó un registro nuevo."
+            ).classes("text-xs text-slate-500")
+            with ui.row().classes("items-center gap-2 no-wrap bg-slate-50 rounded-lg q-pa-sm"):
+                ui.icon("description", size="16px").classes("text-slate-400")
+                with ui.column().classes("gap-0 min-w-0"):
+                    ui.label(existente.nombre_archivo_original).classes(
+                        "text-xs font-medium text-slate-700 ellipsis"
+                    ).style("max-width:260px")
+                    ui.label(info.etiqueta).classes(
+                        "rounded-full px-2 py-0.5 text-[10px] font-medium w-fit"
+                    ).style(estilo_badge(info.color))
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Cerrar").props("flat no-caps color=grey").on_click(dialogo.close)
+                ui.button("Ver documento existente", icon="open_in_new").props(
+                    "color=primary no-caps"
+                ).on_click(lambda: (dialogo.close(), ui.navigate.to(f"/revision/{existente.id}")))
+        dialogo.open()
 
     def _exportar_csv() -> None:
         """Exporta a CSV la vista actual (mismo filtro de estado/búsqueda/fechas
