@@ -21,10 +21,24 @@ más antiguo que `WATCHFOLDER_ESTABILIDAD_MS` — evita ingerir a medias un
 archivo que el escáner aún está escribiendo.
 
 Deduplicación con el canal WEB: las copias que la propia aplicación escribe
-en 01_entrada llevan prefijo `{epoch_ms}_` y se ignoran aquí.
+en 01_entrada llevan prefijo `{epoch_ms}_` y se ignoran aquí. La
+deduplicación por contenido (SHA-256, contra CUALQUIER documento ya
+registrado, no solo los procesados) la hace `core.pipeline.
+FlujoDocumental.ingestar_y_procesar` — este módulo no la duplica.
 
 Después de ingerir un archivo, el ORIGINAL del escáner se consume (borra):
 el pipeline ya persistió su propia copia o aisló una cuarentena con motivo.
+
+Endurecido contra dos puntos ciegos del watchfolder (a diferencia del canal
+WEB, aquí no hay un formulario que valide nada antes de que el archivo
+llegue a disco):
+    - Tamaño máximo (`MAX_UPLOAD_BYTES`, misma paridad que el canal WEB):
+      se aísla sin reintentar, sin releer el archivo completo a memoria.
+    - Bloqueo de archivo persistente (antivirus, un share SMB que no
+      soltó el descriptor — WinError 32 en Windows): reintenta acotado
+      por `WATCHFOLDER_MAX_REINTENTOS` (mismo contador que ya protegía
+      los fallos de ingesta) en vez de reintentar para siempre en
+      silencio sin aislar nunca el archivo.
 """
 
 from __future__ import annotations
@@ -204,10 +218,31 @@ class VigilanteCarpetas:
         if rastreado is None:
             rastreado = _ArchivoRastreado(0, 0.0)
 
+        # Límite de tamaño (paridad con el canal WEB, ver
+        # ui.views_dashboard._manejar_carga): antes solo el upload web lo
+        # aplicaba — un PDF pesado dejado en el watchfolder se leía entero
+        # a memoria y avanzaba sin control. Se comprueba con el tamaño ya
+        # confirmado estable por _barrer_carpeta, sin releer el archivo.
+        if rastreado.tamano > self.config.max_upload_bytes:
+            limite_mb = self.config.max_upload_bytes // (1024 * 1024)
+            logger.warning(
+                "%s (%.1f MB) excede el límite de %d MB, se aísla sin reintentar",
+                ruta.name, rastreado.tamano / (1024 * 1024), limite_mb,
+            )
+            self._aislar(ruta, f"FILE_TOO_LARGE :: {rastreado.tamano} bytes (máx. {self.config.max_upload_bytes})")
+            return
+
         try:
             contenido = ruta.read_bytes()
         except OSError as exc:
-            logger.warning("No se pudo leer %s, se reintenta: %s", ruta.name, exc)
+            # Archivo bloqueado por otro proceso (antivirus, un share SMB
+            # que aún no soltó el descriptor, etc.): antes se reintentaba
+            # para siempre, sin tope ni cuarentena — un bloqueo permanente
+            # (permisos, un proceso que nunca libera el archivo) quedaba
+            # dando vueltas en el log sin que nadie se enterara nunca. Se
+            # reutiliza el mismo contador/tope acotado que ya protege el
+            # camino de fallo de ingesta, más abajo.
+            self._reintentar_o_aislar(ruta, rastreado, "WATCHFOLDER_FILE_LOCKED", exc)
             return
 
         if not contenido:
@@ -224,17 +259,26 @@ class VigilanteCarpetas:
             logger.warning("%s: %s", ruta.name, exc)
             self._consumir_original(ruta)
         except Exception as exc:  # noqa: BLE001 — fallo inesperado
-            intentos = rastreado.intentos_fallo + 1
-            logger.error(
-                "Fallo inesperado ingiriendo %s (intento %d/%d): %s",
-                ruta.name, intentos, self.config.watchfolder_max_reintentos, exc,
-            )
-            if intentos >= self.config.watchfolder_max_reintentos:
-                self._aislar(ruta, f"WATCHFOLDER_MAX_RETRIES :: {exc}")
-                return
-            self._rastreados[ruta.name] = _ArchivoRastreado(
-                tamano=rastreado.tamano, mtime_ms=rastreado.mtime_ms, intentos_fallo=intentos
-            )
+            self._reintentar_o_aislar(ruta, rastreado, "WATCHFOLDER_MAX_RETRIES", exc)
+
+    def _reintentar_o_aislar(
+        self, ruta: Path, rastreado: "_ArchivoRastreado", codigo: str, exc: Exception
+    ) -> None:
+        """Cuenta un intento fallido (lectura bloqueada o ingesta) y, al
+        agotar `watchfolder_max_reintentos`, aísla en cuarentena — antes
+        SOLO el camino de fallo de ingesta tenía este tope; un bloqueo de
+        lectura persistente reintentaba indefinidamente sin nunca avisar."""
+        intentos = rastreado.intentos_fallo + 1
+        logger.error(
+            "Fallo procesando %s (intento %d/%d): %s",
+            ruta.name, intentos, self.config.watchfolder_max_reintentos, exc,
+        )
+        if intentos >= self.config.watchfolder_max_reintentos:
+            self._aislar(ruta, f"{codigo} :: {exc}")
+            return
+        self._rastreados[ruta.name] = _ArchivoRastreado(
+            tamano=rastreado.tamano, mtime_ms=rastreado.mtime_ms, intentos_fallo=intentos
+        )
 
     def _consumir_original(self, ruta: Path) -> None:
         """Borra el original del escáner tras una ingesta persistida."""
