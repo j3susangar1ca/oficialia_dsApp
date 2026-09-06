@@ -11,6 +11,7 @@ google-genai>=1.0,<2       # SDK oficial de Gemini 2.5 Flash
 playwright>=1.45,<2        # RPA de la Intranet Webix (op_cucs.fwx)
 gspread>=6.0,<7            # Google Sheets (Service Account)
 google-auth>=2.30          # Credenciales de la Service Account
+python-docx>=1.1,<2        # Generación del .docx de respuestas a oficios (core/doc_generator.py)
 
 # Opcional — referencia OCR auxiliar (core/pdf_engine.py: extraer_texto_ocr).
 # Sin esta dependencia y el binario `tesseract-ocr` instalado en el sistema,

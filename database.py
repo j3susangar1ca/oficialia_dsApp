@@ -28,13 +28,17 @@ from core.models import (
     DocumentoRegistro,
     EstadoBloqueo,
     EstadoDocumento,
+    EstadoRespuesta,
     EstadoSheets,
     InfoPreproceso,
     MetadatosOficio,
     MetodoExtraccion,
     OrigenIngesta,
     RegistroAuditoria,
+    RegistroRespuesta,
+    RespuestaOficio,
     ResultadoRpa,
+    SentidoRespuesta,
     ahora_mas_minutos_utc_iso,
     ahora_utc_iso,
 )
@@ -106,6 +110,34 @@ CREATE TABLE IF NOT EXISTS auditoria_hitl (
 );
 
 CREATE INDEX IF NOT EXISTS idx_auditoria_documento ON auditoria_hitl(documento_id, fecha);
+
+-- Asistente de respuesta con IA: un oficio registrado puede tener varios
+-- borradores de contestación a lo largo del tiempo (relación N:1 con
+-- documentos), cada uno con su propio ciclo BORRADOR → APROBADA. Solo la
+-- respuesta APROBADA tiene `ruta_docx` (ver core.doc_generator) — nunca se
+-- genera el .docx antes de que un revisor apruebe el texto.
+CREATE TABLE IF NOT EXISTS respuestas_oficios (
+    id                        TEXT PRIMARY KEY,
+    documento_id              TEXT NOT NULL REFERENCES documentos(id),
+    sentido                   TEXT NOT NULL
+        CHECK (sentido IN ('atencion_favorable', 'solicitud_prorroga', 'requerimiento_info',
+                           'incompetencia_turno', 'negativa_fundada', 'personalizada')),
+    instrucciones_adicionales TEXT,
+    fundamento_legal          TEXT,
+    firmante_nombre           TEXT NOT NULL,
+    firmante_cargo            TEXT NOT NULL,
+    respuesta_json            TEXT NOT NULL,
+    estado                    TEXT NOT NULL DEFAULT 'BORRADOR'
+        CHECK (estado IN ('BORRADOR', 'APROBADA')),
+    ruta_docx                 TEXT,
+    revisor_usuario_id        TEXT,
+    fecha_creacion            TEXT NOT NULL,
+    fecha_aprobacion          TEXT,
+    updated_at                TEXT NOT NULL,
+    version                   INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_respuestas_documento ON respuestas_oficios(documento_id, fecha_creacion);
 """
 
 # ======================================================================
@@ -175,9 +207,42 @@ def _migracion_2_a_3(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE documentos ADD COLUMN {columna} TEXT")
 
 
+def _migracion_3_a_4(conn: sqlite3.Connection) -> None:
+    """
+    v3 → v4: crea la tabla `respuestas_oficios` — borradores de contestación
+    generados con IA (core/ai_responder.py) y su ciclo de aprobación HITL
+    hasta la generación del .docx final (core/doc_generator.py).
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS respuestas_oficios (
+            id                        TEXT PRIMARY KEY,
+            documento_id              TEXT NOT NULL REFERENCES documentos(id),
+            sentido                   TEXT NOT NULL
+                CHECK (sentido IN ('atencion_favorable', 'solicitud_prorroga', 'requerimiento_info',
+                                   'incompetencia_turno', 'negativa_fundada', 'personalizada')),
+            instrucciones_adicionales TEXT,
+            fundamento_legal          TEXT,
+            firmante_nombre           TEXT NOT NULL,
+            firmante_cargo            TEXT NOT NULL,
+            respuesta_json            TEXT NOT NULL,
+            estado                    TEXT NOT NULL DEFAULT 'BORRADOR'
+                CHECK (estado IN ('BORRADOR', 'APROBADA')),
+            ruta_docx                 TEXT,
+            revisor_usuario_id        TEXT,
+            fecha_creacion            TEXT NOT NULL,
+            fecha_aprobacion          TEXT,
+            updated_at                TEXT NOT NULL,
+            version                   INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_respuestas_documento ON respuestas_oficios(documento_id, fecha_creacion)")
+
+
 #: Migraciones en orden: `_MIGRACIONES[N]` lleva de la versión N a la N+1.
 #: `VERSION_ESQUEMA` (= len(_MIGRACIONES)) es la versión objetivo actual.
-_MIGRACIONES: list = [_migracion_0_a_1, _migracion_1_a_2, _migracion_2_a_3]
+_MIGRACIONES: list = [_migracion_0_a_1, _migracion_1_a_2, _migracion_2_a_3, _migracion_3_a_4]
 VERSION_ESQUEMA: int = len(_MIGRACIONES)
 
 
@@ -713,6 +778,118 @@ class RepositorioDocumentos:
             )
             for fila in filas
         ]
+
+    # ------------------------------------------------------------------
+    # Respuestas a oficios — asistente de redacción con IA (HITL)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _a_modelo_respuesta(fila: sqlite3.Row) -> RegistroRespuesta:
+        return RegistroRespuesta(
+            id=fila["id"],
+            documento_id=fila["documento_id"],
+            sentido=SentidoRespuesta(fila["sentido"]),
+            instrucciones_adicionales=fila["instrucciones_adicionales"],
+            fundamento_legal=fila["fundamento_legal"],
+            firmante_nombre=fila["firmante_nombre"],
+            firmante_cargo=fila["firmante_cargo"],
+            respuesta=RespuestaOficio.model_validate_json(fila["respuesta_json"]),
+            estado=EstadoRespuesta(fila["estado"]),
+            ruta_docx=fila["ruta_docx"],
+            revisor_usuario_id=fila["revisor_usuario_id"],
+            fecha_creacion=fila["fecha_creacion"],
+            fecha_aprobacion=fila["fecha_aprobacion"],
+            updated_at=fila["updated_at"],
+            version=fila["version"],
+        )
+
+    def crear_respuesta(self, registro: RegistroRespuesta) -> RegistroRespuesta:
+        """Inserta un nuevo borrador de contestación (estado BORRADOR)."""
+        with self._conexion() as conn:
+            conn.execute(
+                """
+                INSERT INTO respuestas_oficios (
+                    id, documento_id, sentido, instrucciones_adicionales, fundamento_legal,
+                    firmante_nombre, firmante_cargo, respuesta_json, estado, ruta_docx,
+                    revisor_usuario_id, fecha_creacion, fecha_aprobacion, updated_at, version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    registro.id,
+                    registro.documento_id,
+                    registro.sentido.value,
+                    registro.instrucciones_adicionales,
+                    registro.fundamento_legal,
+                    registro.firmante_nombre,
+                    registro.firmante_cargo,
+                    registro.respuesta.model_dump_json(),
+                    registro.estado.value,
+                    registro.ruta_docx,
+                    registro.revisor_usuario_id,
+                    registro.fecha_creacion,
+                    registro.fecha_aprobacion,
+                    ahora_utc_iso(),
+                    registro.version,
+                ),
+            )
+        return registro
+
+    def actualizar_respuesta(
+        self, respuesta_id: str, respuesta: RespuestaOficio, *, version_esperada: int
+    ) -> RegistroRespuesta:
+        """Persiste la edición del revisor sobre un borrador (sin cambiar de estado)."""
+        with self._conexion() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE respuestas_oficios
+                   SET respuesta_json = ?, updated_at = ?, version = version + 1
+                 WHERE id = ? AND version = ?
+                """,
+                (respuesta.model_dump_json(), ahora_utc_iso(), respuesta_id, version_esperada),
+            )
+            if cursor.rowcount == 0:
+                raise ErrorConcurrencia(f"Conflicto de versión al editar la respuesta {respuesta_id}")
+        registro = self.obtener_respuesta(respuesta_id)
+        assert registro is not None
+        return registro
+
+    def aprobar_respuesta(
+        self,
+        respuesta_id: str,
+        *,
+        ruta_docx: str,
+        revisor: str,
+        version_esperada: int,
+    ) -> RegistroRespuesta:
+        """Marca el borrador como APROBADA una vez generado el .docx final."""
+        with self._conexion() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE respuestas_oficios
+                   SET estado = 'APROBADA', ruta_docx = ?, revisor_usuario_id = ?,
+                       fecha_aprobacion = ?, updated_at = ?, version = version + 1
+                 WHERE id = ? AND version = ?
+                """,
+                (ruta_docx, revisor, ahora_utc_iso(), ahora_utc_iso(), respuesta_id, version_esperada),
+            )
+            if cursor.rowcount == 0:
+                raise ErrorConcurrencia(f"Conflicto de versión al aprobar la respuesta {respuesta_id}")
+        registro = self.obtener_respuesta(respuesta_id)
+        assert registro is not None
+        return registro
+
+    def obtener_respuesta(self, respuesta_id: str) -> Optional[RegistroRespuesta]:
+        with self._conexion() as conn:
+            fila = conn.execute("SELECT * FROM respuestas_oficios WHERE id = ?", (respuesta_id,)).fetchone()
+        return self._a_modelo_respuesta(fila) if fila else None
+
+    def listar_respuestas(self, documento_id: str) -> list[RegistroRespuesta]:
+        """Historial de borradores/contestaciones de un oficio, más reciente primero."""
+        with self._conexion() as conn:
+            filas = conn.execute(
+                "SELECT * FROM respuestas_oficios WHERE documento_id = ? ORDER BY fecha_creacion DESC",
+                (documento_id,),
+            ).fetchall()
+        return [self._a_modelo_respuesta(fila) for fila in filas]
 
 
 def iniciar_bd() -> RepositorioDocumentos:

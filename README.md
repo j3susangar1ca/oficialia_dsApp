@@ -427,6 +427,7 @@ Copie [`.env.example`](.env.example) a `.env`; `config.py` es la fuente única d
 | Interfaz | `APP_HOST`, `APP_PORT`, `MAX_UPLOAD_BYTES`, `STORAGE_SECRET` | `0.0.0.0`, `8080`, 25 MiB; `STORAGE_SECRET` firma la sesión de navegador (`app.storage.user`) que recuerda el "Revisor en turno" entre páginas — no protege ningún límite de seguridad (LAN sin autenticación) |
 | Datos | `DATABASE_PATH`, `STORAGE_ROOT` | `data/oficialia.db` y `storage/` |
 | IA | `GEMINI_API_KEY`, `GEMINI_MODELO`, `GEMINI_TIMEOUT_MS`, `GEMINI_REINTENTOS`, `RENDER_DPI`, `RENDER_MAX_PAGINAS` | Sin `GEMINI_API_KEY`, el documento se descarta de forma trazable; modelo `gemini-2.5-flash` |
+| Respuesta a oficios | `RESPUESTAS_GEMINI_MODELO`, `RESPUESTAS_PLANTILLA_DOCX` | Reutiliza `GEMINI_API_KEY`; sin `RESPUESTAS_PLANTILLA_DOCX` el `.docx` se genera sin membrete institucional |
 | Watchfolder | `WATCHFOLDER_ENABLED`, `WATCHFOLDER_INTERVALO_MS`, `WATCHFOLDER_ESTABILIDAD_MS`, `WATCHFOLDER_MAX_REINTENTOS` | Activo, sondeo de respaldo cada 5 s; el mismo tope de reintentos cubre fallos de ingesta y archivos bloqueados |
 | Revisión HITL | `HITL_LOCK_TTL_MIN` | 3 minutos — vencimiento del bloqueo de edición si el revisor cierra la pestaña sin confirmar ni descartar |
 | RPA | `RPA_MODO`, `RPA_HEADLESS`, `RPA_TIMEOUT_MS`, `RPA_REINTENTOS`, `RPA_SIMULACION_FALLAR` | `playwright` (real) en esta instalación; fije `RPA_MODO=simulacion` para pruebas locales sin navegador |
@@ -448,6 +449,7 @@ También se admite `GOOGLE_APPLICATION_CREDENTIALS`, o un archivo `credentials.j
 3. Corrija y confirme los campos extraídos, o descarte el documento con un motivo. Si otro revisor ya lo tiene abierto, el formulario se muestra en solo lectura con su nombre visible.
 4. Tras confirmar, supervise el resultado `COMPLETADO` o `ERROR_RPA`; este último se puede reintentar sin repetir la extracción.
 5. Exporte a CSV la vista filtrada actual (buscador, rango de fechas y estado aplicados) para bitácoras de turno.
+6. Desde el panel **Asistente de Respuesta con IA** (visible en cualquier oficio con metadatos, sin importar su estado), capture el sentido de la contestación, el fundamento legal y las instrucciones al funcionario y genere un borrador con IA (`core/ai_responder.py`). Edítelo en pantalla las veces que sea necesario y solo al aprobarlo se genera el `.docx` final (`core/doc_generator.py`) — nada se envía ni se firma de forma automática.
 
 Las rutas HTTP están destinadas al visor interno de NiceGUI:
 
@@ -457,6 +459,7 @@ Las rutas HTTP están destinadas al visor interno de NiceGUI:
 | `/revision/{doc_id}` | Visor PDF y formulario HITL del documento. |
 | `/pdf/{doc_id}` | El PDF vigente o `404`. |
 | `/evidencia/{doc_id}` | Captura PNG del acuse RPA o `404`. |
+| `/respuesta/{respuesta_id}/docx` | El `.docx` de una respuesta ya APROBADA o `404`. |
 
 Ejemplos de consulta local, usando un identificador existente:
 
@@ -535,7 +538,7 @@ Para generar solamente `dist\OficialiaDigitalDSA` sin requerir Inno Setup:
 ├── ui/                      # Bandeja, layout y revisión HITL
 ├── docs/screenshots/        # Capturas usadas en este README
 ├── storage/                 # Artefactos operativos ignorados por Git
-├── tests/                   # Suite pytest aislada (142 pruebas)
+├── tests/                   # Suite pytest aislada (173 pruebas)
 └── packaging/               # PyInstaller e Inno Setup
 ```
 

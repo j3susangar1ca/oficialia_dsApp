@@ -11,7 +11,18 @@ import pymupdf
 import pytest
 
 from core.ai_extractor import ErrorExtraccionIA
-from core.models import EstadoDocumento, MetadatosOficio, MetodoExtraccion, OrigenIngesta, Procedencia
+from core.models import (
+    DocumentoRegistro,
+    EstadoDocumento,
+    EstadoRespuesta,
+    MetadatosOficio,
+    MetodoExtraccion,
+    OrigenIngesta,
+    PeticionRespuesta,
+    Procedencia,
+    RespuestaOficio,
+    SentidoRespuesta,
+)
 from core.pipeline import FlujoDocumental
 
 
@@ -74,7 +85,7 @@ class _ExtractorCapturaPistas:
 
 @pytest.fixture
 def flujo(repositorio, gestor_archivos, configuracion):
-    def _crear(extractor) -> FlujoDocumental:
+    def _crear(extractor, redactor=None) -> FlujoDocumental:
         return FlujoDocumental(
             repositorio=repositorio,
             archivos=gestor_archivos,
@@ -82,6 +93,7 @@ def flujo(repositorio, gestor_archivos, configuracion):
             rpa=None,
             sincronizador_sheets=None,
             configuracion=configuracion,
+            redactor=redactor,
         )
     return _crear
 
@@ -192,3 +204,101 @@ class TestVerificarDuplicado:
         pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
         pipeline.verificar_duplicado(_pdf_con_oficio())
         assert pipeline.repo.listar() == []
+
+
+class _RedactorFalso:
+    """Doble de RedactorRespuestas: devuelve un borrador fijo y registra los
+    argumentos recibidos, sin red ni credenciales reales."""
+
+    def __init__(self):
+        self.llamadas: list[dict] = []
+
+    def generar_borrador(self, oficio_origen, peticion):
+        self.llamadas.append({"oficio_origen": oficio_origen, "peticion": peticion})
+        return RespuestaOficio(
+            destinatario_nombre=oficio_origen.remitente_nombre,
+            asunto="Respuesta generada por el doble de prueba",
+            cuerpo_respuesta="Cuerpo de prueba.",
+            despedida="Sin otro particular por el momento, quedo de usted.",
+        )
+
+
+class TestAsistenteDeRespuestaConIA:
+    """core.pipeline.FlujoDocumental.generar_borrador_respuesta /
+    actualizar_borrador_respuesta / generar_documento_respuesta — segundo
+    flujo HITL del sistema (ver core/ai_responder.py, core/doc_generator.py)."""
+
+    def test_generar_borrador_requiere_documento_existente(self, flujo):
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"), _RedactorFalso())
+        with pytest.raises(ValueError, match="no encontrado"):
+            pipeline.generar_borrador_respuesta("id-inexistente", PeticionRespuesta())
+
+    def test_generar_borrador_requiere_metadatos_del_oficio(self, flujo):
+        """Un documento aún en INGESTADO/EN_PREPROCESO no tiene de dónde
+        partir para redactar una contestación."""
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"), _RedactorFalso())
+        registro = pipeline.repo.crear(
+            DocumentoRegistro(
+                id="doc-sin-metadatos",
+                nombre_archivo_original="oficio.pdf",
+                ruta_archivo_actual="01_entrada/oficio.pdf",
+                origen=OrigenIngesta.WEB_DRAG_DROP,
+                estado=EstadoDocumento.INGESTADO,
+                sha256="e" * 64,
+            )
+        )
+        with pytest.raises(ValueError, match="metadatos"):
+            pipeline.generar_borrador_respuesta(registro.id, PeticionRespuesta())
+
+    def test_generar_borrador_persiste_y_devuelve_borrador(self, flujo):
+        redactor = _RedactorFalso()
+        pipeline = flujo(_ExtractorCapturaPistas(), redactor)
+        documento = pipeline.ingestar_y_procesar("oficio.pdf", OrigenIngesta.WEB_DRAG_DROP, _pdf_con_oficio())
+        peticion = PeticionRespuesta(sentido=SentidoRespuesta.REQUERIMIENTO_INFO, firmante_nombre="ANA TORRES")
+
+        registro = pipeline.generar_borrador_respuesta(documento.id, peticion)
+
+        assert registro.documento_id == documento.id
+        assert registro.estado == EstadoRespuesta.BORRADOR
+        assert registro.sentido == SentidoRespuesta.REQUERIMIENTO_INFO
+        assert registro.firmante_nombre == "ANA TORRES"
+        assert len(redactor.llamadas) == 1
+        assert redactor.llamadas[0]["oficio_origen"].numero_oficio == documento.metadatos_extraidos.numero_oficio
+        # Persistido de verdad en SQLite, no solo en memoria.
+        assert pipeline.repo.obtener_respuesta(registro.id) is not None
+
+    def test_actualizar_borrador_edita_sin_aprobar(self, flujo):
+        pipeline = flujo(_ExtractorCapturaPistas(), _RedactorFalso())
+        documento = pipeline.ingestar_y_procesar("oficio.pdf", OrigenIngesta.WEB_DRAG_DROP, _pdf_con_oficio())
+        registro = pipeline.generar_borrador_respuesta(documento.id, PeticionRespuesta())
+
+        editado = pipeline.actualizar_borrador_respuesta(
+            registro.id,
+            RespuestaOficio(
+                destinatario_nombre="OTRO DESTINATARIO",
+                asunto="Asunto editado a mano por el revisor",
+                cuerpo_respuesta="Cuerpo editado.",
+                despedida="Atentamente.",
+            ),
+            version_esperada=registro.version,
+        )
+
+        assert editado.estado == EstadoRespuesta.BORRADOR
+        assert editado.respuesta.destinatario_nombre == "OTRO DESTINATARIO"
+
+    def test_generar_documento_aprueba_y_produce_docx_en_storage(self, flujo, gestor_archivos):
+        pipeline = flujo(_ExtractorCapturaPistas(), _RedactorFalso())
+        documento = pipeline.ingestar_y_procesar("oficio.pdf", OrigenIngesta.WEB_DRAG_DROP, _pdf_con_oficio())
+        registro = pipeline.generar_borrador_respuesta(documento.id, PeticionRespuesta())
+
+        aprobado = pipeline.generar_documento_respuesta(registro.id, "ana")
+
+        assert aprobado.estado == EstadoRespuesta.APROBADA
+        assert aprobado.ruta_docx is not None
+        assert aprobado.ruta_docx.startswith("05_respuestas/")
+        assert gestor_archivos.existe(aprobado.ruta_docx)
+
+    def test_generar_documento_respuesta_inexistente_lanza(self, flujo):
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"), _RedactorFalso())
+        with pytest.raises(ValueError, match="no encontrada"):
+            pipeline.generar_documento_respuesta("respuesta-inexistente", "ana")

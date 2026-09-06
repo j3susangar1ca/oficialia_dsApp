@@ -36,6 +36,7 @@ configurar_logging(DATOS_DIR)
 logger = logging.getLogger("oficialia.main")
 
 from core.ai_extractor import ExtractorMetadatos  # noqa: E402
+from core.ai_responder import RedactorRespuestas  # noqa: E402
 from core.file_manager import GestorArchivos  # noqa: E402
 from core.pipeline import FlujoDocumental  # noqa: E402
 from core.sheets_sync import SincronizadorSheets  # noqa: E402
@@ -61,6 +62,12 @@ def _componer_pipeline() -> FlujoDocumental:
         timeout_ms=configuracion.gemini_timeout_ms,
         reintentos=configuracion.gemini_reintentos,
     )
+    redactor = RedactorRespuestas(
+        api_key=configuracion.gemini_api_key,
+        modelo=configuracion.respuestas_gemini_modelo,
+        timeout_ms=configuracion.gemini_timeout_ms,
+        reintentos=configuracion.gemini_reintentos,
+    )
     worker_rpa = crear_rpa(configuracion)
     sincronizador = SincronizadorSheets(configuracion)
 
@@ -71,6 +78,7 @@ def _componer_pipeline() -> FlujoDocumental:
         rpa=worker_rpa,
         sincronizador_sheets=sincronizador,
         configuracion=configuracion,
+        redactor=redactor,
     )
 
 
@@ -121,6 +129,22 @@ def _registrar_rutas_archivos() -> None:
         if not ruta.is_file():
             raise HTTPException(status_code=404, detail="Evidencia no disponible")
         return FileResponse(ruta, media_type="image/png")
+
+    @app.get("/respuesta/{respuesta_id}/docx")
+    def servir_respuesta_docx(respuesta_id: str):
+        """Descarga del .docx de una respuesta ya APROBADA (ver core.pipeline.
+        FlujoDocumental.generar_documento_respuesta)."""
+        registro = pipeline.repo.obtener_respuesta(respuesta_id)
+        if registro is None or not registro.ruta_docx:
+            raise HTTPException(status_code=404, detail="Documento de respuesta no disponible")
+        ruta = (configuracion.storage_root / registro.ruta_docx).resolve()
+        if not ruta.is_file():
+            raise HTTPException(status_code=404, detail="Archivo físico no disponible")
+        return FileResponse(
+            ruta,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=ruta.name.split("__", 1)[-1],
+        )
 
 
 _registrar_rutas_archivos()

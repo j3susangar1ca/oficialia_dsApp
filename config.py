@@ -33,6 +33,7 @@ import shutil
 import sys
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -180,6 +181,19 @@ class Configuracion(BaseSettings):
     render_max_paginas: int = 10        # Máximo de páginas enviadas al modelo
 
     # ------------------------------------------------------------------
+    # Asistente de respuesta a oficios — redacción con IA (core/ai_responder.py)
+    # ------------------------------------------------------------------
+    # Reutiliza el mismo proveedor/credencial de gemini_api_key: es la misma
+    # cuenta de Gemini, solo cambia el prompt y el contrato de salida (ver
+    # core.ai_responder.RedactorRespuestas). Vacío ⇒ el asistente reporta
+    # "no configurado" de forma honesta, igual que la extracción.
+    respuestas_gemini_modelo: str = "gemini-2.5-flash"
+    # Ruta ABSOLUTA a un .docx con el membrete institucional (logotipos, pie
+    # de página) sobre el que se agrega el contenido de la respuesta (ver
+    # core.doc_generator.generar_docx_respuesta). Vacío ⇒ documento en blanco.
+    respuestas_plantilla_docx: str = ""
+
+    # ------------------------------------------------------------------
     # Vigilancia de carpetas (watchdog sobre storage/01_entrada)
     # ------------------------------------------------------------------
     watchfolder_enabled: bool = True
@@ -320,6 +334,12 @@ class Configuracion(BaseSettings):
     def sheets_configurado(self) -> bool:
         """True cuando hay hoja destino Y credenciales de Service Account."""
         return bool(self.google_sheets_spreadsheet_id.strip())
+
+    @property
+    def respuestas_plantilla_path(self) -> Optional[Path]:
+        """Ruta de la plantilla institucional para respuestas, o None si no se configuró."""
+        valor = self.respuestas_plantilla_docx.strip()
+        return Path(valor) if valor else None
 
     @property
     def smb_export_configurado(self) -> bool:

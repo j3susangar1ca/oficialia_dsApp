@@ -140,7 +140,7 @@ class GestorArchivos:
     # ------------------------------------------------------------------
     def asegurar_estructura(self) -> None:
         """Crea el árbol completo de storage si aún no existe."""
-        for carpeta in ("01_entrada", "02_en_proceso", "03_procesados", "04_errores"):
+        for carpeta in ("01_entrada", "02_en_proceso", "03_procesados", "04_errores", "05_respuestas"):
             (self.raiz / carpeta).mkdir(parents=True, exist_ok=True)
 
     def absoluta(self, ruta_relativa: str) -> Path:
@@ -222,6 +222,25 @@ class GestorArchivos:
 
         sha_final = self._hash_archivo(pdf_relativo)
         return pdf_relativo, json_relativo, sha_final
+
+    def guardar_respuesta_docx(self, respuesta_id: str, contenido: bytes, nombre_sugerido: str) -> str:
+        """
+        Persiste el .docx aprobado de una respuesta a oficio en
+        `05_respuestas/{respuesta_id}__{nombre_sugerido}` (el id garantiza
+        unicidad aunque dos respuestas distintas resuelvan al mismo nombre
+        sugerido, ej. mismo destinatario).
+        """
+        seguro = self._nombre_seguro(nombre_sugerido)
+        relativo = f"05_respuestas/{respuesta_id}__{seguro}"
+        destino = self.absoluta(relativo)
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            destino.write_bytes(contenido)
+        except OSError as exc:
+            raise ErrorAlmacenamiento(
+                "RESPUESTA_DOCX_WRITE_FAILED", f"No se pudo escribir el .docx de respuesta: {relativo}", relativo
+            ) from exc
+        return relativo
 
     def mover_a_error(self, ruta_relativa: str, motivo: str) -> str:
         """

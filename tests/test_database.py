@@ -15,10 +15,14 @@ from config import Configuracion
 from core.models import (
     DocumentoRegistro,
     EstadoDocumento,
+    EstadoRespuesta,
     MetadatosOficio,
     MetodoExtraccion,
     OrigenIngesta,
     Procedencia,
+    RegistroRespuesta,
+    RespuestaOficio,
+    SentidoRespuesta,
 )
 from database import ErrorConcurrencia, RepositorioDocumentos, VERSION_ESQUEMA
 
@@ -287,3 +291,93 @@ class TestBloqueoConcurrente:
         repositorio.liberar_bloqueo(doc.id, "ana")
 
         assert repositorio.obtener(doc.id).version == version_original
+
+
+def _respuesta_oficio(**overrides) -> RespuestaOficio:
+    datos = dict(
+        destinatario_nombre="JUAN PÉREZ LÓPEZ",
+        asunto="Respuesta a solicitud de información",
+        cuerpo_respuesta="Párrafo único de la contestación.",
+        despedida="Sin otro particular por el momento, quedo de usted.",
+    )
+    datos.update(overrides)
+    return RespuestaOficio(**datos)
+
+
+def _registro_respuesta(documento_id: str, **overrides) -> RegistroRespuesta:
+    datos = dict(
+        id=str(uuid.uuid4()),
+        documento_id=documento_id,
+        sentido=SentidoRespuesta.ATENCION_FAVORABLE,
+        firmante_nombre="Titular de la Unidad Administrativa",
+        firmante_cargo="Director / Encargado de Área",
+        respuesta=_respuesta_oficio(),
+    )
+    datos.update(overrides)
+    return RegistroRespuesta(**datos)
+
+
+class TestRespuestasOficios:
+    """CRUD de `respuestas_oficios` (asistente de respuesta con IA, ver
+    core.ai_responder y core.pipeline.FlujoDocumental.
+    generar_borrador_respuesta/generar_documento_respuesta)."""
+
+    def test_crear_y_obtener(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        creado = repositorio.crear_respuesta(_registro_respuesta(doc.id))
+
+        leido = repositorio.obtener_respuesta(creado.id)
+
+        assert leido is not None
+        assert leido.documento_id == doc.id
+        assert leido.estado == EstadoRespuesta.BORRADOR
+        assert leido.respuesta.destinatario_nombre == "JUAN PÉREZ LÓPEZ"
+
+    def test_actualizar_respuesta_persiste_la_edicion_y_avanza_version(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        creado = repositorio.crear_respuesta(_registro_respuesta(doc.id))
+
+        editado = repositorio.actualizar_respuesta(
+            creado.id, _respuesta_oficio(asunto="Asunto corregido por el revisor"), version_esperada=creado.version
+        )
+
+        assert editado.version == creado.version + 1
+        assert editado.estado == EstadoRespuesta.BORRADOR  # editar no aprueba
+        assert editado.respuesta.asunto == "Asunto corregido por el revisor"
+
+    def test_actualizar_con_version_desactualizada_lanza_error_concurrencia(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        creado = repositorio.crear_respuesta(_registro_respuesta(doc.id))
+        repositorio.actualizar_respuesta(creado.id, _respuesta_oficio(), version_esperada=creado.version)
+
+        with pytest.raises(ErrorConcurrencia):
+            repositorio.actualizar_respuesta(creado.id, _respuesta_oficio(), version_esperada=creado.version)
+
+    def test_aprobar_respuesta_fija_ruta_docx_y_revisor(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        creado = repositorio.crear_respuesta(_registro_respuesta(doc.id))
+
+        aprobado = repositorio.aprobar_respuesta(
+            creado.id, ruta_docx="05_respuestas/x.docx", revisor="ana", version_esperada=creado.version
+        )
+
+        assert aprobado.estado == EstadoRespuesta.APROBADA
+        assert aprobado.ruta_docx == "05_respuestas/x.docx"
+        assert aprobado.revisor_usuario_id == "ana"
+        assert aprobado.fecha_aprobacion is not None
+
+    def test_listar_respuestas_de_un_documento_mas_reciente_primero(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        primero = repositorio.crear_respuesta(_registro_respuesta(doc.id, fecha_creacion="2026-01-01T00:00:00.000Z"))
+        segundo = repositorio.crear_respuesta(_registro_respuesta(doc.id, fecha_creacion="2026-01-02T00:00:00.000Z"))
+
+        listado = repositorio.listar_respuestas(doc.id)
+
+        assert [r.id for r in listado] == [segundo.id, primero.id]
+
+    def test_listar_respuestas_de_otro_documento_no_se_mezclan(self, repositorio: RepositorioDocumentos):
+        doc_a = repositorio.crear(_documento(sha256="c" * 64))
+        doc_b = repositorio.crear(_documento(sha256="d" * 64))
+        repositorio.crear_respuesta(_registro_respuesta(doc_a.id))
+
+        assert repositorio.listar_respuestas(doc_b.id) == []
