@@ -24,12 +24,18 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from nicegui import app, ui
-
 # ----------------------------------------------------------------------
 # 1) Logging y configuración
 # ----------------------------------------------------------------------
+# `config` debe importarse ANTES que `nicegui`: fija NICEGUI_STORAGE_PATH
+# (ver config._redirigir_almacenamiento_nicegui) para que el almacenamiento
+# de sesión de NiceGUI no intente escribir junto al ejecutable instalado
+# (de solo lectura para un usuario estándar) — ver PermissionError
+# [WinError 5] Acceso denegado en versiones previas.
 from config import DATOS_DIR, EMPAQUETADO, get_settings  # noqa: E402
+
+from nicegui import app, ui  # noqa: E402
+
 from core.logging_setup import configurar_logging  # noqa: E402
 
 configurar_logging(DATOS_DIR)

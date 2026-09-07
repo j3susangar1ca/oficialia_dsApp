@@ -124,8 +124,35 @@ def _preparar_navegador_playwright_empaquetado() -> None:
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(navegadores))
 
 
+def _redirigir_almacenamiento_nicegui() -> None:
+    """
+    Por defecto, NiceGUI persiste `app.storage.general`/`app.storage.user`
+    (identidad de "Revisor en turno", bloqueo de edición concurrente) en una
+    carpeta `.nicegui` RELATIVA a la carpeta de trabajo del proceso —ver
+    `nicegui.storage.Storage.__init__`—, resuelta una sola vez al importar
+    `nicegui`. En el ejecutable instalado, esa carpeta de trabajo suele ser
+    la del propio instalador (`Archivos de programa\\OficialiaDigitalDSA`),
+    de solo lectura para un usuario estándar ⇒ NiceGUI falla con
+    `PermissionError [WinError 5] Acceso denegado` en cada respaldo
+    periódico (no detiene la aplicación, pero la identidad del revisor y el
+    bloqueo de edición nunca se guardan en disco).
+
+    Se fija `NICEGUI_STORAGE_PATH` a una subcarpeta directa de `DATOS_DIR`
+    (la carpeta de datos por máquina, ya creada con permisos de escritura
+    verificados por `_directorio_datos_predeterminado` — no depende de que
+    `data/` o `storage/` existan todavía) ANTES de que algo importe
+    `nicegui` — por eso debe llamarse aquí y no dentro de `Configuracion`,
+    y por lo que `main.py` importa este módulo antes que `nicegui`.
+    `setdefault` respeta un valor ya definido por el entorno.
+    """
+    if not EMPAQUETADO:
+        return
+    os.environ.setdefault("NICEGUI_STORAGE_PATH", str(DATOS_DIR / ".nicegui"))
+
+
 _sembrar_env_inicial()
 _preparar_navegador_playwright_empaquetado()
+_redirigir_almacenamiento_nicegui()
 
 
 class Configuracion(BaseSettings):
