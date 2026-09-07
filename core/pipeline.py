@@ -48,10 +48,13 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from config import Configuracion, get_settings
 from core.ai_extractor import ErrorExtraccionIA, ExtractorMetadatos
+from core.ai_responder import RedactorRespuestas
+from core.doc_generator import generar_docx_respuesta, nombre_archivo_respuesta
 from core.file_manager import GestorArchivos, exportar_a_red_smb
 from core.heuristic_extractor import extraer_heuristico, extraer_pistas
 from core.models import (
@@ -62,6 +65,9 @@ from core.models import (
     MetadatosOficio,
     MetodoExtraccion,
     OrigenIngesta,
+    PeticionRespuesta,
+    RegistroRespuesta,
+    RespuestaOficio,
     ResultadoRpa,
     diferencia_metadatos,
 )
@@ -116,6 +122,7 @@ class FlujoDocumental:
         rpa,
         sincronizador_sheets,
         configuracion: Optional[Configuracion] = None,
+        redactor: Optional[RedactorRespuestas] = None,
     ) -> None:
         self.repo = repositorio
         self.archivos = archivos
@@ -123,6 +130,16 @@ class FlujoDocumental:
         self.rpa = rpa
         self.sheets = sincronizador_sheets
         self.config = configuracion or get_settings()
+        # Asistente de respuesta con IA (segundo caso de uso, ver
+        # core/ai_responder.py): opcional en la firma solo para no romper
+        # instanciaciones existentes (tests, composición manual); en
+        # producción main.py siempre lo provee.
+        self.redactor = redactor or RedactorRespuestas(
+            api_key=self.config.gemini_api_key,
+            modelo=self.config.respuestas_gemini_modelo,
+            timeout_ms=self.config.gemini_timeout_ms,
+            reintentos=self.config.gemini_reintentos,
+        )
 
         self.ejecutor_ingesta = ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="oficialia-ingesta"
@@ -551,6 +568,85 @@ class FlujoDocumental:
             )
         except Exception:  # noqa: BLE001
             logger.exception("No se pudo persistir el estado Sheets de %s", doc_id)
+
+    # ------------------------------------------------------------------
+    # Flujo 4 — Asistente de respuesta a oficios con IA (HITL)
+    # ------------------------------------------------------------------
+    # Nunca se envía ni se sella nada de forma autónoma: generar_borrador_
+    # respuesta solo propone texto; el revisor lo edita en pantalla
+    # (actualizar_borrador_respuesta) y únicamente al aprobar
+    # (generar_documento_respuesta) se produce el .docx descargable.
+    def generar_borrador_respuesta(self, doc_id: str, peticion: PeticionRespuesta) -> RegistroRespuesta:
+        """
+        Redacta con IA un borrador de contestación al oficio `doc_id` y lo
+        persiste como un nuevo registro en estado BORRADOR.
+
+        :raises ValueError: si el documento no existe o aún no tiene
+            metadatos (validados o al menos extraídos) de los que partir.
+        """
+        documento = self.repo.obtener(doc_id)
+        if documento is None:
+            raise ValueError(f"Documento no encontrado: {doc_id}")
+        oficio_origen = documento.metadatos_validados or documento.metadatos_extraidos
+        if oficio_origen is None:
+            raise ValueError("El oficio aún no tiene metadatos extraídos: nada de qué partir para redactar")
+
+        respuesta = self.redactor.generar_borrador(oficio_origen, peticion)
+        registro = self.repo.crear_respuesta(
+            RegistroRespuesta(
+                id=str(uuid.uuid4()),
+                documento_id=doc_id,
+                sentido=peticion.sentido,
+                instrucciones_adicionales=peticion.instrucciones_adicionales,
+                fundamento_legal=peticion.fundamento_legal,
+                firmante_nombre=peticion.firmante_nombre,
+                firmante_cargo=peticion.firmante_cargo,
+                respuesta=respuesta,
+            )
+        )
+        logger.info("Borrador de respuesta %s generado para el oficio %s", registro.id, doc_id)
+        return registro
+
+    def actualizar_borrador_respuesta(
+        self, respuesta_id: str, respuesta_editada: RespuestaOficio, *, version_esperada: int
+    ) -> RegistroRespuesta:
+        """Persiste la edición humana sobre un borrador aún no aprobado."""
+        return self.repo.actualizar_respuesta(respuesta_id, respuesta_editada, version_esperada=version_esperada)
+
+    def generar_documento_respuesta(
+        self, respuesta_id: str, revisor: str, *, plantilla_path: Optional[str] = None
+    ) -> RegistroRespuesta:
+        """
+        Aprueba el borrador (acción HITL final del flujo) y genera el .docx
+        en `storage/05_respuestas/` — punto de no retorno del borrador (el
+        texto queda fijado en el .docx; ediciones posteriores requieren un
+        nuevo borrador).
+
+        :param plantilla_path: ruta absoluta a un .docx con membrete
+            institucional (ver core.doc_generator); None ⇒ documento en blanco.
+        :raises ValueError: si la respuesta no existe o el oficio de origen desapareció.
+        """
+        registro = self.repo.obtener_respuesta(respuesta_id)
+        if registro is None:
+            raise ValueError(f"Respuesta no encontrada: {respuesta_id}")
+        documento = self.repo.obtener(registro.documento_id)
+        if documento is None:
+            raise ValueError(f"Oficio de origen no encontrado: {registro.documento_id}")
+
+        contenido_docx = generar_docx_respuesta(
+            registro.respuesta,
+            firmante_nombre=registro.firmante_nombre,
+            firmante_cargo=registro.firmante_cargo,
+            plantilla_path=Path(plantilla_path) if plantilla_path else None,
+        )
+        nombre = nombre_archivo_respuesta(documento, registro.respuesta)
+        ruta_docx = self.archivos.guardar_respuesta_docx(registro.id, contenido_docx, nombre)
+
+        actualizado = self.repo.aprobar_respuesta(
+            respuesta_id, ruta_docx=ruta_docx, revisor=revisor, version_esperada=registro.version
+        )
+        logger.info("Respuesta %s aprobada por %s → %s", respuesta_id, revisor, ruta_docx)
+        return actualizado
 
     # ------------------------------------------------------------------
     # Ciclo de vida del proceso

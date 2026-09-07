@@ -406,6 +406,99 @@ class EstadoBloqueo(BaseModel):
     poseido_por: Optional[str] = None
 
 
+# ======================================================================
+# 6. RESPUESTA A OFICIOS — asistente de redacción con IA (HITL)
+# ======================================================================
+#
+# Modela el segundo flujo HITL del sistema: a partir de un oficio ya
+# registrado (MetadatosOficio), el revisor puede pedirle a la IA un
+# BORRADOR de contestación institucional, editarlo en pantalla y —solo
+# entonces— aprobarlo para generar el .docx final (ver core/ai_responder.py,
+# core/doc_generator.py y database.py::respuestas_oficios). Nunca se
+# considera "enviado" ni se sella nada de forma autónoma: la aprobación
+# humana es la que habilita la generación del documento descargable.
+
+
+class SentidoRespuesta(str, Enum):
+    """Directriz de fondo que el funcionario le da a la IA para redactar."""
+    ATENCION_FAVORABLE = "atencion_favorable"
+    SOLICITUD_PRORROGA = "solicitud_prorroga"
+    REQUERIMIENTO_INFO = "requerimiento_info"
+    INCOMPETENCIA_TURNO = "incompetencia_turno"
+    NEGATIVA_FUNDADA = "negativa_fundada"
+    PERSONALIZADA = "personalizada"
+
+
+#: Estados del ciclo de vida de una respuesta redactada.
+class EstadoRespuesta(str, Enum):
+    BORRADOR = "BORRADOR"    # generado/editado, aún sin aprobar
+    APROBADA = "APROBADA"    # revisor confirmó el texto; .docx ya generado
+
+
+class PeticionRespuesta(BaseModel):
+    """Directrices del funcionario que disparan la redacción (entrada de la IA)."""
+
+    sentido: SentidoRespuesta = SentidoRespuesta.ATENCION_FAVORABLE
+    instrucciones_adicionales: Optional[str] = Field(
+        default=None, description="Notas libres del funcionario (fechas, condiciones, tono)"
+    )
+    fundamento_legal: Optional[str] = Field(
+        default=None, description="Artículo/norma aplicable sugerido, si el funcionario lo tiene a la mano"
+    )
+    firmante_nombre: str = Field(
+        default="Titular de la Unidad Administrativa", description="Quién firma la respuesta"
+    )
+    firmante_cargo: str = Field(
+        default="Director / Encargado de Área", description="Cargo de quien firma la respuesta"
+    )
+
+    @field_validator("instrucciones_adicionales", "fundamento_legal")
+    @classmethod
+    def _vacio_a_none(cls, valor: Optional[str]) -> Optional[str]:
+        """Una cadena vacía del formulario HITL se trata como "no capturado"."""
+        valor = (valor or "").strip()
+        return valor or None
+
+
+class RespuestaOficio(BaseModel):
+    """Contenido estructurado de la contestación (salida de la IA / borrador editable)."""
+
+    numero_oficio_salida: Optional[str] = Field(default=None, description="Folio de salida, si ya se asignó")
+    destinatario_nombre: str = Field(..., description="Funcionario a quien se dirige la respuesta")
+    destinatario_cargo: Optional[str] = Field(default=None, description="Cargo del destinatario")
+    destinatario_dependencia: Optional[str] = Field(default=None, description="Dependencia del destinatario")
+    asunto: str = Field(..., description="Resumen de la contestación")
+    cuerpo_respuesta: str = Field(..., description="Párrafos del oficio, separados por líneas en blanco")
+    despedida: str = Field(
+        default="Sin otro particular por el momento, quedo de usted.",
+        description="Fórmula de cortesía institucional",
+    )
+    ccp: list[str] = Field(default_factory=list, description="Áreas a marcar copia (ej. 'Archivo', 'Minutario')")
+
+
+class RegistroRespuesta(BaseModel):
+    """Fila de `respuestas_oficios`: una redacción de contestación y su trazabilidad HITL."""
+
+    id: str
+    documento_id: str
+    #: Directrices que dispararon esta redacción (auditable: qué se le pidió a la IA).
+    sentido: SentidoRespuesta
+    instrucciones_adicionales: Optional[str] = None
+    fundamento_legal: Optional[str] = None
+    firmante_nombre: str
+    firmante_cargo: str
+    #: Contenido vigente (el generado por la IA, o el editado por el revisor).
+    respuesta: RespuestaOficio
+    estado: EstadoRespuesta = EstadoRespuesta.BORRADOR
+    #: Ruta relativa a storage/ del .docx final — solo tras aprobar (ver core.doc_generator).
+    ruta_docx: Optional[str] = None
+    revisor_usuario_id: Optional[str] = None
+    fecha_creacion: str = Field(default_factory=ahora_utc_iso)
+    fecha_aprobacion: Optional[str] = None
+    updated_at: str = Field(default_factory=ahora_utc_iso)
+    version: int = 1
+
+
 def nombre_archivo_canonico(metadatos: MetadatosOficio) -> str:
     """
     Construye la nomenclatura canónica obligatoria:

@@ -33,8 +33,13 @@ from core.models import (
     DocumentoRegistro,
     EstadoBloqueo,
     EstadoDocumento,
+    EstadoRespuesta,
     MetadatosOficio,
     MetodoExtraccion,
+    PeticionRespuesta,
+    RegistroRespuesta,
+    RespuestaOficio,
+    SentidoRespuesta,
     meta_estado,
 )
 from ui.layout import (
@@ -407,6 +412,9 @@ def _panel_formulario(
                     "Formulario de solo lectura: el documento no está en revisión pendiente."
                 ).classes("text-[11px] text-slate-400")
 
+            # ---- Asistente de respuesta con IA (segundo flujo HITL) ----
+            _panel_respuesta_ia(documento, revisor, pipeline, config)
+
             # ---- Historial de auditoría ----
             _panel_auditoria(documento, pipeline)
 
@@ -501,6 +509,248 @@ def _panel_formulario(
     if editable:
         acciones = {"aprobar": _confirmar, "rechazar": _abrir_dialogo_descartar}
     return acciones
+
+
+# ----------------------------------------------------------------------
+# Asistente de respuesta a oficios con IA (segundo flujo HITL, ver
+# core/ai_responder.py y core/pipeline.py::FlujoDocumental.
+# generar_borrador_respuesta / actualizar_borrador_respuesta /
+# generar_documento_respuesta). Sigue el mismo idioma que el resto de la
+# pantalla: cada acción que muta datos vuelve a navegar a la misma URL
+# (en vez de un refresco parcial) para redibujar desde la fuente de verdad
+# en SQLite, igual que _confirmar()/_confirmar_descarte()/_reintentar_rpa()
+# más arriba.
+# ----------------------------------------------------------------------
+_ETIQUETAS_SENTIDO: dict[str, str] = {
+    SentidoRespuesta.ATENCION_FAVORABLE.value: "Atención favorable",
+    SentidoRespuesta.SOLICITUD_PRORROGA.value: "Solicitud de prórroga",
+    SentidoRespuesta.REQUERIMIENTO_INFO.value: "Requerimiento de información",
+    SentidoRespuesta.INCOMPETENCIA_TURNO.value: "Incompetencia / turno",
+    SentidoRespuesta.NEGATIVA_FUNDADA.value: "Negativa fundada",
+    SentidoRespuesta.PERSONALIZADA.value: "Personalizada",
+}
+
+
+def _panel_respuesta_ia(documento: DocumentoRegistro, revisor: dict, pipeline, config) -> None:
+    """
+    Disponible para cualquier oficio que ya tenga metadatos (extraídos o
+    validados): redactar la contestación es una acción independiente de
+    confirmar la extracción original, así que NO depende de `editable` ni
+    del estado del documento (tiene sentido incluso ya COMPLETADO).
+    """
+    oficio_origen = documento.metadatos_validados or documento.metadatos_extraidos
+    if oficio_origen is None:
+        return
+
+    with ui.expansion("Asistente de Respuesta con IA", icon="smart_toy").classes("w-full").props("dense"):
+        with ui.column().classes("w-full gap-3 q-pa-sm"):
+            ui.label(
+                "Genera un borrador de contestación institucional; usted lo revisa, edita y "
+                "aprueba antes de descargar el Word — nada se envía ni se firma de forma automática."
+            ).classes("text-[11px] text-slate-400")
+
+            _formulario_generacion(documento, revisor, pipeline)
+
+            historial = pipeline.repo.listar_respuestas(documento.id)
+            if historial:
+                ui.separator().classes("w-full")
+                for registro in historial:
+                    _tarjeta_borrador_respuesta(registro, documento, revisor, pipeline, config)
+
+
+def _formulario_generacion(documento: DocumentoRegistro, revisor: dict, pipeline) -> None:
+    """Directrices del funcionario + botón [Generar Borrador con IA]."""
+    peticion_estado: dict[str, str] = {
+        "sentido": SentidoRespuesta.ATENCION_FAVORABLE.value,
+        "fundamento_legal": "",
+        "instrucciones_adicionales": "",
+        "firmante_nombre": "Titular de la Unidad Administrativa",
+        "firmante_cargo": "Director / Encargado de Área",
+    }
+
+    with ui.row().classes("w-full gap-3 no-wrap flex-wrap"):
+        ui.select(
+            options=_ETIQUETAS_SENTIDO, value=peticion_estado["sentido"], label="Sentido de la contestación"
+        ).props("dense outlined color=primary").classes("flex-1").style("min-width:220px").bind_value_to(
+            peticion_estado, "sentido"
+        )
+        ui.input("Fundamento legal (opcional)", placeholder="Ej. Art. 8 Constitucional").props(
+            "dense outlined color=primary"
+        ).classes("flex-1").style("min-width:220px").bind_value_to(peticion_estado, "fundamento_legal")
+
+    with ui.row().classes("w-full gap-3 no-wrap flex-wrap"):
+        ui.input("Firma: nombre", value=peticion_estado["firmante_nombre"]).props(
+            "dense outlined color=primary"
+        ).classes("flex-1").style("min-width:220px").bind_value_to(peticion_estado, "firmante_nombre")
+        ui.input("Firma: cargo", value=peticion_estado["firmante_cargo"]).props(
+            "dense outlined color=primary"
+        ).classes("flex-1").style("min-width:220px").bind_value_to(peticion_estado, "firmante_cargo")
+
+    ui.textarea(
+        "Instrucciones / argumentos clave (opcional)",
+        placeholder="Ej. Indicar que el trámite está listo para recogerse el viernes de 9 a 14 hrs.",
+    ).props("dense outlined color=primary autogrow").classes("w-full").bind_value_to(
+        peticion_estado, "instrucciones_adicionales"
+    )
+
+    async def _generar() -> None:
+        try:
+            peticion = PeticionRespuesta(
+                sentido=SentidoRespuesta(peticion_estado["sentido"]),
+                instrucciones_adicionales=peticion_estado["instrucciones_adicionales"],
+                fundamento_legal=peticion_estado["fundamento_legal"],
+                firmante_nombre=peticion_estado["firmante_nombre"],
+                firmante_cargo=peticion_estado["firmante_cargo"],
+            )
+        except Exception as exc:  # noqa: BLE001 — ValidationError de Pydantic
+            ui.notify(f"Revise los campos: {exc}", type="negative", position="top")
+            return
+
+        ui.notify("Generando borrador con IA…", type="info", position="top")
+        try:
+            await run.io_bound(pipeline.generar_borrador_respuesta, documento.id, peticion)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Fallo al generar borrador de respuesta para %s", documento.id)
+            ui.notify(f"No se pudo generar el borrador: {exc}", type="negative", position="top")
+            return
+        ui.notify("Borrador generado.", type="positive", position="top")
+        ui.navigate.to(f"/revision/{documento.id}")
+
+    ui.button("Generar Borrador con IA", icon="auto_awesome").props("color=purple-8 no-caps").on_click(_generar)
+
+
+def _tarjeta_borrador_respuesta(
+    registro: RegistroRespuesta,
+    documento: DocumentoRegistro,
+    revisor: dict,
+    pipeline,
+    config,
+) -> None:
+    """Una contestación generada: editable mientras esté en BORRADOR;
+    de solo lectura + enlace de descarga una vez APROBADA."""
+    contenido = registro.respuesta
+    campo_estado: dict[str, str] = {
+        "destinatario_nombre": contenido.destinatario_nombre,
+        "destinatario_cargo": contenido.destinatario_cargo or "",
+        "destinatario_dependencia": contenido.destinatario_dependencia or "",
+        "asunto": contenido.asunto,
+        "cuerpo_respuesta": contenido.cuerpo_respuesta,
+        "despedida": contenido.despedida,
+        "ccp": ", ".join(contenido.ccp),
+    }
+    editable = registro.estado == EstadoRespuesta.BORRADOR
+
+    with ui.card().classes("w-full shadow-none border border-slate-200 rounded-lg gap-2 q-pa-sm"):
+        with ui.row().classes("w-full items-center justify-between no-wrap"):
+            ui.label(_ETIQUETAS_SENTIDO.get(registro.sentido.value, registro.sentido.value)).classes(
+                "text-xs font-semibold text-slate-700"
+            )
+            aprobada = registro.estado == EstadoRespuesta.APROBADA
+            ui.label("Aprobada" if aprobada else "Borrador").classes(
+                "rounded-full px-2 py-0.5 text-[10px] font-medium"
+            ).style(f"background:{'#d1fae5' if aprobada else '#fef3c7'};color:{'#047857' if aprobada else '#92400e'}")
+        ui.label(
+            f"Generado {tiempo_relativo(registro.fecha_creacion)} · firma: "
+            f"{registro.firmante_nombre} ({registro.firmante_cargo})"
+        ).classes("text-[10.5px] text-slate-400")
+
+        def _campo_resp(clave: str, etiqueta: str, *, multilinea: bool = False):
+            if multilinea:
+                entrada = ui.textarea(etiqueta, value=campo_estado[clave]).props(
+                    "dense outlined color=primary autogrow"
+                )
+            else:
+                entrada = ui.input(etiqueta, value=campo_estado[clave]).props("dense outlined color=primary")
+            entrada.classes("w-full")
+            entrada.bind_value_to(campo_estado, clave)
+            if not editable:
+                entrada.disable()
+            return entrada
+
+        _campo_resp("destinatario_nombre", "Destinatario")
+        with ui.row().classes("w-full gap-2 no-wrap"):
+            _campo_resp("destinatario_cargo", "Cargo del destinatario")
+            _campo_resp("destinatario_dependencia", "Dependencia")
+        _campo_resp("asunto", "Asunto")
+        _campo_resp("cuerpo_respuesta", "Cuerpo de la respuesta", multilinea=True)
+        _campo_resp("despedida", "Despedida")
+        _campo_resp("ccp", "C.c.p. (separados por coma)")
+
+        if not editable:
+            with ui.row().classes("w-full justify-end"):
+                ui.link("Descargar Word", f"/respuesta/{registro.id}/docx", new_tab=True).classes(
+                    "text-xs text-primary font-medium"
+                )
+            return
+
+        def _recolectar() -> RespuestaOficio:
+            return RespuestaOficio(
+                destinatario_nombre=campo_estado["destinatario_nombre"],
+                destinatario_cargo=campo_estado["destinatario_cargo"] or None,
+                destinatario_dependencia=campo_estado["destinatario_dependencia"] or None,
+                asunto=campo_estado["asunto"],
+                cuerpo_respuesta=campo_estado["cuerpo_respuesta"],
+                despedida=campo_estado["despedida"],
+                ccp=[parte.strip() for parte in campo_estado["ccp"].split(",") if parte.strip()],
+            )
+
+        async def _guardar() -> None:
+            try:
+                editado = _recolectar()
+            except Exception as exc:  # noqa: BLE001 — ValidationError de Pydantic
+                ui.notify(f"Revise los campos: {exc}", type="negative", position="top")
+                return
+            try:
+                await run.io_bound(
+                    pipeline.actualizar_borrador_respuesta,
+                    registro.id,
+                    editado,
+                    version_esperada=registro.version,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Fallo al guardar la edición de la respuesta %s", registro.id)
+                ui.notify(f"No se pudo guardar: {exc}", type="negative", position="top")
+                return
+            ui.notify("Cambios guardados.", type="positive", position="top")
+            ui.navigate.to(f"/revision/{documento.id}")
+
+        async def _aprobar() -> None:
+            try:
+                editado = _recolectar()
+            except Exception as exc:  # noqa: BLE001 — ValidationError de Pydantic
+                ui.notify(f"Revise los campos: {exc}", type="negative", position="top")
+                return
+            try:
+                # Guarda cualquier último ajuste ANTES de fijarlo en el .docx.
+                await run.io_bound(
+                    pipeline.actualizar_borrador_respuesta,
+                    registro.id,
+                    editado,
+                    version_esperada=registro.version,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Fallo al guardar antes de aprobar la respuesta %s", registro.id)
+                ui.notify(f"No se pudo guardar: {exc}", type="negative", position="top")
+                return
+
+            plantilla = config.respuestas_plantilla_path
+            try:
+                await run.io_bound(
+                    pipeline.generar_documento_respuesta,
+                    registro.id,
+                    revisor["valor"].strip() or REVISOR_POR_DEFECTO,
+                    plantilla_path=str(plantilla) if plantilla else None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Fallo al aprobar/generar el Word de la respuesta %s", registro.id)
+                ui.notify(f"No se pudo aprobar: {exc}", type="negative", position="top")
+                return
+            ui.notify("Respuesta aprobada: documento Word generado.", type="positive", position="top")
+            ui.navigate.to(f"/revision/{documento.id}")
+
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Guardar cambios", icon="save").props("flat no-caps color=primary").on_click(_guardar)
+            ui.button("Aprobar y generar Word", icon="description").props("color=primary no-caps").on_click(_aprobar)
 
 
 # ----------------------------------------------------------------------
