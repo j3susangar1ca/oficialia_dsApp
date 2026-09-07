@@ -23,10 +23,16 @@
 ;   - Nada se borra de %ProgramData% al desinstalar (Inno Setup no toca
 ;     directorios con archivos que no instaló él mismo: la BD y los PDFs
 ;     institucionales quedan a salvo de una desinstalación accidental).
+;   - El asistente captura las credenciales (GEMINI_API_KEY, usuario y
+;     contraseña de la Intranet, cuenta de servicio de Google opcional) en
+;     una página propia y las escribe directamente en el .env desplegado
+;     (ver sección [Code]) — nadie tiene que abrir Notepad a mano. Si el
+;     .env ya trae esas claves capturadas (reinstalación/actualización), la
+;     página se omite sola: no se vuelven a pedir.
 ; ============================================================================
 
 #define MyAppName "Oficialía Digital DSA"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Hospital Civil de Guadalajara — División de Servicios Administrativos"
 #define MyAppExeName "OficialiaDigitalDSA.exe"
 #define MyDistDir "..\dist\OficialiaDigitalDSA"
@@ -91,9 +97,9 @@ Name: "{commonappdata}\{#MyDataDirName}"; Permissions: users-modify
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
-Name: "{group}\Configuración (.env)"; Filename: "notepad.exe"; \
+Name: "{group}\Configuración avanzada (.env)"; Filename: "notepad.exe"; \
     Parameters: """{commonappdata}\{#MyDataDirName}\.env"""; \
-    Comment: "Editar GEMINI_API_KEY, credenciales RPA y Google Sheets"
+    Comment: "Ajustes avanzados (SMB, hoja de Sheets, timeouts…) — las credenciales principales ya se capturaron durante la instalación"
 Name: "{group}\Carpeta de datos (PDFs, base de datos)"; Filename: "{commonappdata}\{#MyDataDirName}"
 Name: "{group}\Desinstalar {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; \
@@ -116,3 +122,178 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Iniciar {#MyAppName} ahora"; \
 [UninstallRun]
 Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Oficialía Digital DSA"""; \
     Flags: runhidden
+
+[Code]
+// ============================================================================
+// Página propia del asistente: captura las credenciales de esta instalación
+// (GEMINI_API_KEY, usuario/contraseña de la Intranet y, opcionalmente, la
+// cuenta de servicio de Google) y las escribe directamente en el .env
+// desplegado en {commonappdata}\OficialiaDigitalDSA\.env — nadie tiene que
+// abrir Notepad a mano. Si esas claves YA están capturadas (reinstalación o
+// actualización sobre una PC ya configurada), la página se omite sola: ver
+// ShouldSkipPage más abajo. Todo lo demás del .env (SMB, Sheets, timeouts…)
+// sigue siendo editable a mano desde el acceso directo "Configuración
+// avanzada (.env)" del menú Inicio.
+// ============================================================================
+var
+  PaginaCredenciales: TInputQueryWizardPage;
+  PaginaCuentaServicio: TInputFileWizardPage;
+
+const
+  IdxGeminiApiKey = 0;
+  IdxRpaUsuario = 1;
+  IdxRpaPassword = 2;
+
+// Ruta del .env ya desplegado (o donde quedará tras [Files]) en esta PC.
+function RutaEnvDesplegado(): String;
+begin
+  Result := ExpandConstant('{commonappdata}\{#MyDataDirName}\.env');
+end;
+
+// Valor actual de CLAVE= dentro del .env desplegado, o '' si el archivo no
+// existe todavía o la clave no aparece (incluida comentada con '#'). Se usa
+// tanto para prellenar el asistente en una reinstalación como para decidir
+// si ya no hace falta volver a pedir las credenciales (ShouldSkipPage).
+function LeerValorEnv(const Clave: String): String;
+var
+  Lineas: TStringList;
+  I: Integer;
+  Linea, Prefijo: String;
+begin
+  Result := '';
+  if not FileExists(RutaEnvDesplegado()) then
+    Exit;
+  Lineas := TStringList.Create;
+  try
+    Lineas.LoadFromFile(RutaEnvDesplegado());
+    Prefijo := Clave + '=';
+    for I := 0 to Lineas.Count - 1 do
+    begin
+      Linea := Trim(Lineas[I]);
+      if Copy(Linea, 1, Length(Prefijo)) = Prefijo then
+      begin
+        Result := Copy(Linea, Length(Prefijo) + 1, MaxInt);
+        Break;
+      end;
+    end;
+  finally
+    Lineas.Free;
+  end;
+end;
+
+// Reemplaza (o agrega si no existía, comentada o no) la línea "CLAVE=VALOR"
+// dentro del .env desplegado, sin tocar ninguna otra línea. Nunca se llama
+// con Valor vacío (ver CurStepChanged) para no borrar por accidente un
+// valor ya capturado en una instalación anterior.
+procedure EscribirValorEnv(const Clave, Valor: String);
+var
+  Lineas: TStringList;
+  I: Integer;
+  Linea, Prefijo, PrefijoComentado: String;
+  Encontrada: Boolean;
+begin
+  Lineas := TStringList.Create;
+  try
+    if FileExists(RutaEnvDesplegado()) then
+      Lineas.LoadFromFile(RutaEnvDesplegado());
+    Prefijo := Clave + '=';
+    PrefijoComentado := '#' + Prefijo;
+    Encontrada := False;
+    for I := 0 to Lineas.Count - 1 do
+    begin
+      Linea := Trim(Lineas[I]);
+      if (Copy(Linea, 1, Length(Prefijo)) = Prefijo) or
+         (Copy(Linea, 1, Length(PrefijoComentado)) = PrefijoComentado) then
+      begin
+        Lineas[I] := Clave + '=' + Valor;
+        Encontrada := True;
+        Break;
+      end;
+    end;
+    if not Encontrada then
+      Lineas.Add(Clave + '=' + Valor);
+    ForceDirectories(ExtractFileDir(RutaEnvDesplegado()));
+    Lineas.SaveToFile(RutaEnvDesplegado());
+  finally
+    Lineas.Free;
+  end;
+end;
+
+procedure InitializeWizard();
+begin
+  PaginaCredenciales := CreateInputQueryPage(wpSelectComponents,
+    'Credenciales de esta instalación',
+    'Se capturan una sola vez — no se le volverán a pedir',
+    'Estos valores se guardan directamente en el .env de esta PC (' +
+    RutaEnvDesplegado() + '). Puede dejar en blanco lo que no use por ' +
+    'ahora y completarlo después desde "Configuración avanzada (.env)" ' +
+    'en el menú Inicio.');
+  PaginaCredenciales.Add('Gemini API key (extracción con IA):', False);
+  PaginaCredenciales.Add('Usuario de la Intranet (RPA_USUARIO):', False);
+  PaginaCredenciales.Add('Contraseña de la Intranet (RPA_PASSWORD):', True);
+  PaginaCredenciales.Values[IdxGeminiApiKey] := LeerValorEnv('GEMINI_API_KEY');
+  PaginaCredenciales.Values[IdxRpaUsuario] := LeerValorEnv('RPA_USUARIO');
+  if PaginaCredenciales.Values[IdxRpaUsuario] = '' then
+    PaginaCredenciales.Values[IdxRpaUsuario] := '2010226';
+  PaginaCredenciales.Values[IdxRpaPassword] := LeerValorEnv('RPA_PASSWORD');
+
+  PaginaCuentaServicio := CreateInputFilePage(PaginaCredenciales.ID,
+    'Google Sheets (opcional)',
+    'Cuenta de servicio para el Tablero de Control',
+    'Si no cuenta con una todavía, deje esto en blanco: la app sigue ' +
+    'funcionando (las filas se respaldan en un CSV local) hasta que la ' +
+    'agregue después. Seleccione el archivo .json de la cuenta de ' +
+    'servicio de Google descargado desde Google Cloud Console.');
+  PaginaCuentaServicio.Add('Archivo .json de la cuenta de servicio:',
+    'Archivos JSON (*.json)|*.json|Todos los archivos (*.*)|*.*', '.json');
+end;
+
+// Si esta PC ya tiene capturadas las credenciales esenciales (GEMINI_API_KEY
+// y RPA_PASSWORD) — de una instalación o reinstalación anterior — se omiten
+// ambas páginas: es exactamente el "no preguntar nunca más".
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if (PageID = PaginaCredenciales.ID) or (PageID = PaginaCuentaServicio.ID) then
+    Result := (LeerValorEnv('GEMINI_API_KEY') <> '') and
+              (LeerValorEnv('RPA_PASSWORD') <> '');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  RutaJson: String;
+  LineasJson: TStringList;
+  I: Integer;
+  JsonEnUnaLinea: String;
+begin
+  if CurStep <> ssPostInstall then
+    Exit;
+
+  if PaginaCredenciales.Values[IdxGeminiApiKey] <> '' then
+    EscribirValorEnv('GEMINI_API_KEY', PaginaCredenciales.Values[IdxGeminiApiKey]);
+  if PaginaCredenciales.Values[IdxRpaUsuario] <> '' then
+    EscribirValorEnv('RPA_USUARIO', PaginaCredenciales.Values[IdxRpaUsuario]);
+  if PaginaCredenciales.Values[IdxRpaPassword] <> '' then
+    EscribirValorEnv('RPA_PASSWORD', PaginaCredenciales.Values[IdxRpaPassword]);
+
+  // El .json de la cuenta de servicio se aplana a una sola línea (el campo
+  // GOOGLE_SERVICE_ACCOUNT_JSON del .env es de una sola línea); las claves
+  // internas del JSON (p. ej. private_key) ya traen sus saltos de línea
+  // escapados como "\n" dentro de la cadena, así que unir las líneas del
+  // archivo sin separador no corrompe el JSON.
+  RutaJson := PaginaCuentaServicio.Values[0];
+  if (RutaJson <> '') and FileExists(RutaJson) then
+  begin
+    LineasJson := TStringList.Create;
+    try
+      LineasJson.LoadFromFile(RutaJson);
+      JsonEnUnaLinea := '';
+      for I := 0 to LineasJson.Count - 1 do
+        JsonEnUnaLinea := JsonEnUnaLinea + Trim(LineasJson[I]);
+      if JsonEnUnaLinea <> '' then
+        EscribirValorEnv('GOOGLE_SERVICE_ACCOUNT_JSON', JsonEnUnaLinea);
+    finally
+      LineasJson.Free;
+    end;
+  end;
+end;

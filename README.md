@@ -527,6 +527,14 @@ Para generar solamente `dist\OficialiaDigitalDSA` sin requerir Inno Setup:
 .\packaging\build_windows.ps1 -SinInstalador
 ```
 
+El instalador (`packaging/oficialia.iss`) captura `GEMINI_API_KEY`, `RPA_USUARIO`/`RPA_PASSWORD`
+y, opcionalmente, el `.json` de la cuenta de servicio de Google en una página propia del
+asistente y las escribe directamente en el `.env` de `%ProgramData%\OficialiaDigitalDSA` — no
+hace falta editarlo a mano. Si esa PC ya tiene `GEMINI_API_KEY` y `RPA_PASSWORD` capturados (de
+una instalación previa), la página se omite sola en una reinstalación/actualización. El resto de
+variables (SMB, Sheets, timeouts…) se sigue ajustando a mano desde el acceso directo
+"Configuración avanzada (.env)" del menú Inicio.
+
 ## Estructura del repositorio
 
 ```text
