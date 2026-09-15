@@ -29,6 +29,14 @@
 ;     (ver sección [Code]) — nadie tiene que abrir Notepad a mano. Si el
 ;     .env ya trae esas claves capturadas (reinstalación/actualización), la
 ;     página se omite sola: no se vuelven a pedir.
+;   - AppId fijo entre versiones (no cambiar): así Inno Setup reconoce una
+;     instalación anterior como ACTUALIZACIÓN en el mismo {app}, en vez de
+;     instalar en paralelo. CloseApplications cierra la app anterior si
+;     sigue corriendo (evita el "archivo en uso" al sobrescribir el .exe) y
+;     [InstallDelete] limpia {app} por completo antes de copiar los
+;     archivos nuevos, para que ningún .dll/.pyd de una compilación de
+;     PyInstaller anterior quede mezclado con los de esta versión (la causa
+;     típica de que una instalación "encima" de otra quede en conflicto).
 ;   - Si quien compila el instalador definió GEMINI_API_KEY en su entorno
 ;     (variable local o secreto de GitHub Actions — ver
 ;     build_windows.ps1), esa clave real ya viene escrita en el .env de
@@ -40,7 +48,7 @@
 ; ============================================================================
 
 #define MyAppName "Oficialía Digital DSA"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "Hospital Civil de Guadalajara — División de Servicios Administrativos"
 #define MyAppExeName "OficialiaDigitalDSA.exe"
 #define MyDistDir "..\dist\OficialiaDigitalDSA"
@@ -75,6 +83,14 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 ; Windows 10 = NT 10.0 — cubre Windows 10 y 11, no instala en versiones anteriores.
 MinVersion=10.0
 SetupLogging=yes
+; Si una versión anterior sigue corriendo (servidor NiceGUI + navegador
+; abiertos), Windows Restart Manager la detecta y la cierra automáticamente
+; antes de sobrescribir {#MyAppExeName} y sus DLL — sin esto, el instalador
+; fallaba con "archivo en uso" al actualizar sobre una instalación previa
+; activa. No se reinicia sola (RestartApplications=no): el usuario decide
+; cuándo volver a abrirla desde [Run] al terminar el asistente.
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
@@ -87,6 +103,18 @@ Name: "personalizada"; Description: "Personalizada"; Flags: iscustom
 [Components]
 Name: "app"; Description: "Oficialía Digital DSA"; Types: completa minima personalizada; Flags: fixed
 Name: "rpa"; Description: "Automatización RPA — navegador Chromium (~300 MB, requerido solo para RPA_MODO=playwright)"; Types: completa personalizada
+
+[InstallDelete]
+; Limpia {app} por completo ANTES de copiar los archivos de esta versión
+; (corre antes que [Files]). PyInstaller regenera "_internal\" en cada
+; build con nombres/versión de DLL que pueden cambiar entre releases;
+; [Files] con "ignoreversion" solo sobrescribe lo que trae esta versión,
+; nunca borra lo que sobra de una anterior — así que sin este paso, una
+; actualización podía dejar mezclados .dll/.pyd de dos compilaciones
+; distintas de PyInstaller y la app fallaba al arrancar ("conflicto con la
+; versión pasada instalada"). Nada de esto toca %ProgramData% (BD, PDFs,
+; .env): esos datos viven fuera de {app} — ver [Dirs] más abajo.
+Type: filesandordirs; Name: "{app}"
 
 [Files]
 ; Aplicación (PyInstaller onedir) sin el navegador — ese va aparte, como
