@@ -107,6 +107,67 @@ def _sembrar_env_inicial() -> None:
         logger.warning("No se pudo crear %s a partir de la plantilla empaquetada", destino, exc_info=True)
 
 
+def _reparar_gemini_api_key_faltante() -> None:
+    """
+    Auto-reparación de instalaciones YA existentes: `_sembrar_env_inicial`
+    (arriba) solo siembra un `.env` cuando todavía no existe uno, así que
+    una PC que instaló una versión anterior del instalador con la
+    plantilla sin clave (ver comentario de `gemini_api_key` en
+    `Configuracion`) se queda con GEMINI_API_KEY vacía para siempre, aunque
+    después se distribuya un instalador más nuevo con una clave por
+    defecto incrustada (ver `packaging/build_windows.ps1` y
+    `packaging/oficialia.iss`). Esta función completa esa clave faltante
+    tomándola de la plantilla `.env.example` empaquetada EN ESTE
+    ejecutable — si trae una real — sin que el usuario final tenga que
+    abrir ningún `.env`/`.txt` a mano: basta con actualizar la instalación
+    y volver a abrir la aplicación.
+
+    Nunca sobrescribe una clave ya capturada (a mano, por el asistente del
+    instalador, o por una reparación anterior): si `GEMINI_API_KEY` en el
+    `.env` desplegado ya tiene un valor, esta función no toca el archivo.
+    """
+    if not EMPAQUETADO:
+        return
+    destino = DATOS_DIR / ".env"
+    origen = _RECURSOS_DIR / ".env.example"
+    if not destino.is_file() or not origen.is_file():
+        return
+    try:
+        contenido_actual = destino.read_text(encoding="utf-8")
+    except OSError:
+        logger.warning("No se pudo leer %s para revisar GEMINI_API_KEY", destino, exc_info=True)
+        return
+    for linea in contenido_actual.splitlines():
+        if linea.strip().upper().startswith("GEMINI_API_KEY=") and linea.split("=", 1)[1].strip():
+            return  # ya hay una clave capturada: no se toca nada.
+    try:
+        contenido_plantilla = origen.read_text(encoding="utf-8")
+    except OSError:
+        return
+    clave_plantilla = ""
+    for linea in contenido_plantilla.splitlines():
+        if linea.strip().upper().startswith("GEMINI_API_KEY="):
+            clave_plantilla = linea.split("=", 1)[1].strip()
+            break
+    if not clave_plantilla:
+        return  # este instalador tampoco trae una clave por defecto.
+    if "GEMINI_API_KEY=" in contenido_actual:
+        import re
+        nuevo_contenido = re.sub(
+            r"(?mi)^GEMINI_API_KEY=.*$",
+            f"GEMINI_API_KEY={clave_plantilla}",
+            contenido_actual,
+            count=1,
+        )
+    else:
+        nuevo_contenido = contenido_actual.rstrip("\n") + f"\nGEMINI_API_KEY={clave_plantilla}\n"
+    try:
+        destino.write_text(nuevo_contenido, encoding="utf-8")
+        logger.info("GEMINI_API_KEY completada automáticamente en %s desde la plantilla empaquetada", destino)
+    except OSError:
+        logger.warning("No se pudo completar GEMINI_API_KEY en %s", destino, exc_info=True)
+
+
 def _preparar_navegador_playwright_empaquetado() -> None:
     """
     El instalador coloca el Chromium de Playwright en `pw-browsers/`, junto
@@ -152,6 +213,7 @@ def _redirigir_almacenamiento_nicegui() -> None:
 
 
 _sembrar_env_inicial()
+_reparar_gemini_api_key_faltante()
 _preparar_navegador_playwright_empaquetado()
 _redirigir_almacenamiento_nicegui()
 
@@ -200,6 +262,14 @@ class Configuracion(BaseSettings):
     # Deliberadamente SIN default real: es un secreto y este archivo se
     # versiona en git. Cárguela en el `.env` local (ignorado por git, ver
     # `.gitignore`), nunca aquí ni en `.env.example`.
+    #
+    # En el ejecutable empaquetado NO hace falta capturarla a mano en cada
+    # PC: si quien compiló el instalador definió una GEMINI_API_KEY real en
+    # su entorno de build (secreto de GitHub Actions o variable local — ver
+    # `packaging/build_windows.ps1`), esa clave ya queda escrita en el
+    # `.env` desplegado desde la primera ejecución (`_sembrar_env_inicial` /
+    # `_reparar_gemini_api_key_faltante` arriba); el usuario final nunca
+    # abre un `.env`/`.txt`.
     gemini_api_key: str = ""            # Vacío ⇒ la extracción fallará de forma honesta
     gemini_modelo: str = "gemini-2.5-flash"
     gemini_timeout_ms: int = 45_000     # Límite de espera de la inferencia
