@@ -8,7 +8,14 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from core.models import MetadatosOficio, Procedencia, nombre_archivo_canonico
+from core.models import (
+    CampoUbicacion,
+    ExtraccionOficio,
+    MetadatosOficio,
+    Procedencia,
+    UbicacionesCampos,
+    nombre_archivo_canonico,
+)
 
 CAMPOS_BASE = dict(
     fecha_emision="2026-08-15",
@@ -94,6 +101,49 @@ class TestPlazoDias:
     def test_negativo_es_invalido(self):
         with pytest.raises(ValidationError):
             _metadatos(plazo_dias=-1)
+
+
+class TestUbicacionesCampos:
+    """CampoUbicacion/UbicacionesCampos/ExtraccionOficio — contrato de las
+    ubicaciones visuales opcionales (bounding boxes) que la IA reporta junto
+    a los metadatos y que el visor HITL usa para el resaltado interactivo
+    (ver core.ai_extractor, ui.views_hitl._panel_visor)."""
+
+    def test_campo_sin_ubicacion_reportada_queda_en_none(self):
+        ubicaciones = UbicacionesCampos(
+            numero_oficio=CampoUbicacion(pagina=1, x0=0.1, y0=0.1, x1=0.4, y1=0.15)
+        )
+        assert ubicaciones.numero_oficio is not None
+        assert ubicaciones.fecha_emision is None
+
+    @pytest.mark.parametrize("campo", ["x0", "y0", "x1", "y1"])
+    def test_coordenadas_fuera_de_0_1_son_invalidas(self, campo):
+        base = dict(pagina=1, x0=0.1, y0=0.1, x1=0.4, y1=0.2)
+        base[campo] = 1.5
+        with pytest.raises(ValidationError):
+            CampoUbicacion(**base)
+
+    def test_pagina_menor_a_uno_es_invalida(self):
+        with pytest.raises(ValidationError):
+            CampoUbicacion(pagina=0, x0=0.1, y0=0.1, x1=0.4, y1=0.2)
+
+    def test_extraccion_oficio_envuelve_metadatos_y_ubicaciones(self):
+        extraccion = ExtraccionOficio(
+            metadatos=_metadatos(),
+            ubicaciones=UbicacionesCampos(
+                numero_oficio=CampoUbicacion(pagina=1, x0=0.6, y0=0.05, x1=0.9, y1=0.1)
+            ),
+        )
+        assert extraccion.metadatos.numero_oficio == "DSA-2026-089-OF"
+        assert extraccion.ubicaciones.numero_oficio.pagina == 1
+
+    def test_extraccion_oficio_ubicaciones_por_defecto_todas_vacias(self):
+        """Si la IA omite el objeto ubicaciones por completo, el envoltorio
+        debe seguir siendo válido (todo el resaltado queda simplemente
+        deshabilitado, nunca rompe la extracción)."""
+        extraccion = ExtraccionOficio(metadatos=_metadatos())
+        assert extraccion.ubicaciones.numero_oficio is None
+        assert extraccion.ubicaciones.asunto is None
 
 
 class TestNombreArchivoCanonico:

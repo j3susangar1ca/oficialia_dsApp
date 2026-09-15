@@ -13,6 +13,7 @@ import pytest
 
 from config import Configuracion
 from core.models import (
+    CampoUbicacion,
     DocumentoRegistro,
     EstadoDocumento,
     EstadoRespuesta,
@@ -23,6 +24,7 @@ from core.models import (
     RegistroRespuesta,
     RespuestaOficio,
     SentidoRespuesta,
+    UbicacionesCampos,
 )
 from database import ErrorConcurrencia, RepositorioDocumentos, VERSION_ESQUEMA
 
@@ -130,6 +132,80 @@ class TestExtraccionMetodo:
         # Sobrevive un roundtrip completo por SQLite (no es solo el objeto en memoria).
         releido = repositorio.obtener(doc.id)
         assert releido.extraccion_metodo == MetodoExtraccion.HEURISTICA_FALLBACK
+
+
+class TestUbicacionesCampos:
+    """Persistencia de las ubicaciones visuales (bounding boxes) opcionales
+    que acompañan a metadatos_extraidos — ver core.models.UbicacionesCampos
+    y el visor HITL interactivo (ui.views_hitl._panel_visor)."""
+
+    def _metadatos(self) -> MetadatosOficio:
+        return MetadatosOficio(
+            numero_oficio="DSA-2026-089-OF",
+            fecha_emision="2026-08-15",
+            procedencia=Procedencia.AJENA,
+            dependencia_area="DSA",
+            remitente_nombre="ALGUIEN",
+            destinatario_nombre="ALGUIEN MAS",
+            asunto="Asunto de prueba con longitud suficiente para el contrato.",
+        )
+
+    def test_guardar_metadatos_persiste_ubicaciones(self, repositorio: RepositorioDocumentos):
+        doc = repositorio.crear(_documento())
+        ubicaciones = UbicacionesCampos(
+            numero_oficio=CampoUbicacion(pagina=1, x0=0.1, y0=0.1, x1=0.4, y1=0.15)
+        )
+        repositorio.guardar_metadatos_extraidos(
+            doc.id, self._metadatos(), EstadoDocumento.PENDIENTE_REVISION,
+            version_esperada=doc.version, ubicaciones=ubicaciones,
+        )
+        releido = repositorio.obtener(doc.id)
+        assert releido.ubicaciones_campos is not None
+        assert releido.ubicaciones_campos.numero_oficio.pagina == 1
+        assert releido.ubicaciones_campos.fecha_emision is None  # campo sin ubicación reportada
+
+    def test_sin_ubicaciones_queda_en_none(self, repositorio: RepositorioDocumentos):
+        """El respaldo heurístico (core.heuristic_extractor) no produce
+        ubicaciones: el campo debe quedar en None, no romper la lectura."""
+        doc = repositorio.crear(_documento())
+        repositorio.guardar_metadatos_extraidos(
+            doc.id, self._metadatos(), EstadoDocumento.PENDIENTE_REVISION,
+            version_esperada=doc.version, extraccion_metodo=MetodoExtraccion.HEURISTICA_FALLBACK,
+        )
+        releido = repositorio.obtener(doc.id)
+        assert releido.ubicaciones_campos is None
+
+
+class TestSiguientePendiente:
+    """`siguiente_pendiente` — base del modo carrusel HITL ("Aprobar y
+    Siguiente", ver ui.views_hitl): mantiene al revisor encadenando
+    documentos PENDIENTE_REVISION sin volver a la bandeja general."""
+
+    def test_devuelve_el_mas_antiguo_excluyendo_el_actual(self, repositorio: RepositorioDocumentos):
+        mas_antiguo = repositorio.crear(_documento(
+            estado=EstadoDocumento.PENDIENTE_REVISION, fecha_ingesta="2026-01-01T00:00:00.000Z",
+        ))
+        actual = repositorio.crear(_documento(
+            estado=EstadoDocumento.PENDIENTE_REVISION, fecha_ingesta="2026-01-02T00:00:00.000Z",
+        ))
+        repositorio.crear(_documento(
+            estado=EstadoDocumento.PENDIENTE_REVISION, fecha_ingesta="2026-01-03T00:00:00.000Z",
+        ))
+
+        siguiente = repositorio.siguiente_pendiente(actual.id)
+        assert siguiente is not None
+        assert siguiente.id == mas_antiguo.id
+
+    def test_sin_mas_pendientes_devuelve_none(self, repositorio: RepositorioDocumentos):
+        unico = repositorio.crear(_documento(estado=EstadoDocumento.PENDIENTE_REVISION))
+        assert repositorio.siguiente_pendiente(unico.id) is None
+
+    def test_ignora_documentos_en_otros_estados(self, repositorio: RepositorioDocumentos):
+        actual = repositorio.crear(_documento(estado=EstadoDocumento.PENDIENTE_REVISION))
+        repositorio.crear(_documento(
+            estado=EstadoDocumento.COMPLETADO, fecha_ingesta="2020-01-01T00:00:00.000Z",
+        ))
+        assert repositorio.siguiente_pendiente(actual.id) is None
 
 
 class TestMigracionEsquema:

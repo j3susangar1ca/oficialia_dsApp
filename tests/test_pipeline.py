@@ -22,6 +22,7 @@ from core.models import (
     Procedencia,
     RespuestaOficio,
     SentidoRespuesta,
+    UbicacionesCampos,
 )
 from core.pipeline import FlujoDocumental
 
@@ -72,7 +73,7 @@ class _ExtractorCapturaPistas:
             "textos_ocr": textos_ocr,
             "pistas_heuristicas": pistas_heuristicas,
         })
-        return MetadatosOficio(
+        metadatos = MetadatosOficio(
             numero_oficio="DSA-2026-777-OF",
             fecha_emision="2026-08-15",
             procedencia=Procedencia.AJENA,
@@ -81,6 +82,7 @@ class _ExtractorCapturaPistas:
             destinatario_nombre="ALGUIEN MAS",
             asunto="Asunto de prueba con longitud suficiente para el contrato.",
         )
+        return metadatos, UbicacionesCampos()
 
 
 @pytest.fixture
