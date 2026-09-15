@@ -39,6 +39,7 @@ from core.models import (
     RespuestaOficio,
     ResultadoRpa,
     SentidoRespuesta,
+    UbicacionesCampos,
     ahora_mas_minutos_utc_iso,
     ahora_utc_iso,
 )
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS documentos (
     numero_oficio            TEXT,
     metadatos_extraidos      TEXT,
     metadatos_validados      TEXT,
+    ubicaciones_json         TEXT,
     preproceso_json          TEXT,
     rpa_json                 TEXT,
     sheets_json              TEXT,
@@ -240,9 +242,24 @@ def _migracion_3_a_4(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_respuestas_documento ON respuestas_oficios(documento_id, fecha_creacion)")
 
 
+def _migracion_4_a_5(conn: sqlite3.Connection) -> None:
+    """
+    v4 → v5: agrega `ubicaciones_json` a `documentos` — rectángulos
+    delimitadores (bounding boxes) opcionales por campo de metadatos_
+    extraidos (ver core.models.UbicacionesCampos), usados por el visor PDF
+    de la revisión HITL para resaltar interactivamente el origen visual de
+    cada dato al enfocar su campo en el formulario.
+    """
+    columnas = {fila["name"] for fila in conn.execute("PRAGMA table_info(documentos)")}
+    if "ubicaciones_json" not in columnas:
+        conn.execute("ALTER TABLE documentos ADD COLUMN ubicaciones_json TEXT")
+
+
 #: Migraciones en orden: `_MIGRACIONES[N]` lleva de la versión N a la N+1.
 #: `VERSION_ESQUEMA` (= len(_MIGRACIONES)) es la versión objetivo actual.
-_MIGRACIONES: list = [_migracion_0_a_1, _migracion_1_a_2, _migracion_2_a_3, _migracion_3_a_4]
+_MIGRACIONES: list = [
+    _migracion_0_a_1, _migracion_1_a_2, _migracion_2_a_3, _migracion_3_a_4, _migracion_4_a_5,
+]
 VERSION_ESQUEMA: int = len(_MIGRACIONES)
 
 
@@ -322,6 +339,8 @@ class RepositorioDocumentos:
             numero_oficio=fila["numero_oficio"],
             metadatos_extraidos=_json_metadatos(fila["metadatos_extraidos"]),
             metadatos_validados=_json_metadatos(fila["metadatos_validados"]),
+            ubicaciones_campos=UbicacionesCampos.model_validate_json(fila["ubicaciones_json"])
+            if fila["ubicaciones_json"] else None,
             preproceso=InfoPreproceso.model_validate_json(fila["preproceso_json"]) if fila["preproceso_json"] else None,
             rpa=ResultadoRpa.model_validate_json(fila["rpa_json"]) if fila["rpa_json"] else None,
             sheets=EstadoSheets.model_validate_json(fila["sheets_json"]) if fila["sheets_json"] else EstadoSheets(),
@@ -424,6 +443,7 @@ class RepositorioDocumentos:
         *,
         version_esperada: int,
         extraccion_metodo: MetodoExtraccion = MetodoExtraccion.IA,
+        ubicaciones: Optional[UbicacionesCampos] = None,
     ) -> DocumentoRegistro:
         """
         Persiste los metadatos extraídos y el estado resultante.
@@ -433,13 +453,16 @@ class RepositorioDocumentos:
             produjo estos metadatos porque la IA no estaba disponible —
             queda visible en la bandeja/HITL para que el revisor sepa que
             debe verificar/completar TODOS los campos, no solo confirmar.
+        :param ubicaciones: rectángulos delimitadores opcionales por campo
+            (ver core.models.UbicacionesCampos), producidos únicamente por
+            la extracción IA — `None` en el camino de respaldo heurístico.
         """
         with self._conexion() as conn:
             cursor = conn.execute(
                 """
                 UPDATE documentos
                    SET metadatos_extraidos = ?, numero_oficio = ?, estado = ?,
-                       extraccion_metodo = ?, error_msg = NULL, updated_at = ?,
+                       extraccion_metodo = ?, ubicaciones_json = ?, error_msg = NULL, updated_at = ?,
                        version = version + 1
                  WHERE id = ? AND version = ?
                 """,
@@ -448,6 +471,7 @@ class RepositorioDocumentos:
                     metadatos.numero_oficio,
                     estado.value,
                     extraccion_metodo.value,
+                    ubicaciones.model_dump_json() if ubicaciones is not None else None,
                     ahora_utc_iso(),
                     doc_id,
                     version_esperada,
@@ -702,6 +726,27 @@ class RepositorioDocumentos:
         with self._conexion() as conn:
             filas = conn.execute(sql, parametros).fetchall()
         return [self._a_modelo(fila) for fila in filas]
+
+    def siguiente_pendiente(self, doc_id_actual: str) -> Optional[DocumentoRegistro]:
+        """
+        El documento PENDIENTE_REVISION más antiguo, excluyendo `doc_id_actual`
+        — base del modo carrusel de la revisión HITL ("Aprobar y Siguiente",
+        ver ui.views_hitl): tras confirmar un oficio, mantiene al revisor en
+        un flujo continuo de un documento al siguiente sin pasar por la
+        bandeja general. Orden FIFO (más antiguo primero) para respetar el
+        mismo criterio con el que la bandeja ya prioriza "Pendientes".
+        """
+        with self._conexion() as conn:
+            fila = conn.execute(
+                """
+                SELECT * FROM documentos
+                 WHERE estado = ? AND id != ?
+                 ORDER BY fecha_ingesta ASC
+                 LIMIT 1
+                """,
+                (EstadoDocumento.PENDIENTE_REVISION.value, doc_id_actual),
+            ).fetchone()
+        return self._a_modelo(fila) if fila else None
 
     def contadores_kpi(self) -> dict[str, int]:
         """KPIs de la bandeja: pendientes, en proceso, errores, completados y total."""

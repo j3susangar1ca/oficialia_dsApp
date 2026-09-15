@@ -13,6 +13,7 @@ from core.pdf_engine import (
     calcular_sha256,
     extraer_texto_capa,
     inspeccionar_y_sanitizar,
+    renderizar_pagina,
     renderizar_paginas,
 )
 
@@ -82,6 +83,29 @@ class TestRenderizado:
         buffer = _pdf_en_blanco(paginas=5)
         paginas = renderizar_paginas(buffer, dpi=72, max_paginas=2)
         assert len(paginas) == 2
+
+
+class TestRenderizadoPaginaIndividual:
+    """`renderizar_pagina` — visor PDF interactivo del HITL (main.py:
+    `/pdf/{id}/pagina/{n}.png`), distinto de `renderizar_paginas` (lote
+    para la IA)."""
+
+    def test_renderiza_la_pagina_pedida(self):
+        buffer = _pdf_con_texto("Hola mundo")
+        png = renderizar_pagina(buffer, numero=1, dpi=100)
+        assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_pagina_fuera_de_rango_se_rechaza(self):
+        buffer = _pdf_en_blanco(paginas=2)
+        with pytest.raises(ErrorPdf) as exc:
+            renderizar_pagina(buffer, numero=5)
+        assert exc.value.codigo == "PAGINA_FUERA_DE_RANGO"
+
+    def test_pagina_cero_se_rechaza(self):
+        buffer = _pdf_en_blanco()
+        with pytest.raises(ErrorPdf) as exc:
+            renderizar_pagina(buffer, numero=0)
+        assert exc.value.codigo == "PAGINA_FUERA_DE_RANGO"
 
 
 class TestTextoCapa:

@@ -229,6 +229,62 @@ class MetadatosOficio(BaseModel):
 
 
 # ======================================================================
+# 2.5 UBICACIÓN VISUAL DE CAMPOS (bounding boxes) — resaltado interactivo
+# ======================================================================
+#
+# Complemento opcional de MetadatosOficio: para cada campo que la IA haya
+# podido localizar visualmente en la imagen (core/ai_extractor.py, esquema
+# ExtraccionOficio), se reporta un rectángulo delimitador normalizado.
+# Sirve exclusivamente a la interfaz del visor HITL (ui/views_hitl.py,
+# _panel_visor): al enfocar un campo del formulario, la zona correspondiente
+# del PDF se resalta automáticamente, evitando que el revisor tenga que
+# buscar manualmente el dato en el documento. Nunca sustituye ni valida el
+# texto del campo — es auxiliar y puramente visual.
+
+
+class CampoUbicacion(BaseModel):
+    """Rectángulo delimitador de un campo, normalizado a [0, 1] respecto del
+    ancho/alto de la página donde aparece (independiente de la resolución a
+    la que esa página se renderice para mostrarse en el visor)."""
+
+    #: Página 1-indexada (mismo orden natural con el que se adjuntaron las
+    #: imágenes a la IA; la página 1 es la carátula).
+    pagina: int = Field(..., ge=1, description="Página 1-indexada donde aparece el campo")
+    x0: float = Field(..., ge=0, le=1, description="Borde izquierdo (fracción del ancho de página)")
+    y0: float = Field(..., ge=0, le=1, description="Borde superior (fracción del alto de página)")
+    x1: float = Field(..., ge=0, le=1, description="Borde derecho (fracción del ancho de página)")
+    y1: float = Field(..., ge=0, le=1, description="Borde inferior (fracción del alto de página)")
+
+
+class UbicacionesCampos(BaseModel):
+    """
+    Ubicaciones opcionales por campo de MetadatosOficio. Un campo queda en
+    `None` cuando la IA no pudo asociarlo a una región visual concreta —
+    típicamente porque su valor es de contingencia ("S/N", "NO ESPECIFICADO",
+    "ILEGIBLE") sin origen legible en el documento.
+    """
+
+    numero_oficio: Optional[CampoUbicacion] = None
+    fecha_emision: Optional[CampoUbicacion] = None
+    dependencia_area: Optional[CampoUbicacion] = None
+    remitente_nombre: Optional[CampoUbicacion] = None
+    remitente_cargo: Optional[CampoUbicacion] = None
+    destinatario_nombre: Optional[CampoUbicacion] = None
+    destinatario_cargo: Optional[CampoUbicacion] = None
+    asunto: Optional[CampoUbicacion] = None
+    plazo_dias: Optional[CampoUbicacion] = None
+
+
+class ExtraccionOficio(BaseModel):
+    """Envoltura de la respuesta estructurada de la IA (`response_schema` de
+    core/ai_extractor.py): los metadatos del contrato de dominio de siempre,
+    acompañados de sus ubicaciones visuales opcionales."""
+
+    metadatos: MetadatosOficio
+    ubicaciones: UbicacionesCampos = Field(default_factory=UbicacionesCampos)
+
+
+# ======================================================================
 # 3. SUB-MODELOS DE AUDITORÍA TÉCNICA
 # ======================================================================
 
@@ -290,6 +346,9 @@ class DocumentoRegistro(BaseModel):
     numero_oficio: Optional[str] = None
     metadatos_extraidos: Optional[MetadatosOficio] = None
     metadatos_validados: Optional[MetadatosOficio] = None
+    #: Ubicaciones visuales opcionales de metadatos_extraidos (ver UbicacionesCampos
+    #: arriba) — alimenta el resaltado interactivo del visor PDF en la revisión HITL.
+    ubicaciones_campos: Optional[UbicacionesCampos] = None
     preproceso: Optional[InfoPreproceso] = None
     rpa: Optional[ResultadoRpa] = None
     sheets: EstadoSheets = Field(default_factory=EstadoSheets)

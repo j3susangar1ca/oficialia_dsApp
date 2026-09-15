@@ -100,9 +100,37 @@ vigilante = VigilanteCarpetas(configuracion, pipeline)
 # 3) Rutas de archivos para el visor HITL
 # ----------------------------------------------------------------------
 def _registrar_rutas_archivos() -> None:
-    """Sirve el PDF vigente del documento y la evidencia del acuse."""
-    from fastapi.responses import FileResponse
+    """Sirve el PDF vigente del documento, sus páginas individuales (visor
+    interactivo HITL) y la evidencia del acuse."""
+    from functools import lru_cache
+
     from fastapi import HTTPException
+    from fastapi.responses import FileResponse, Response
+
+    from core.pdf_engine import ErrorPdf, renderizar_pagina
+
+    @lru_cache(maxsize=64)
+    def _renderizar_pagina_cacheada(sha256: str, ruta_str: str, numero: int) -> bytes:
+        # `sha256` participa de la llave de caché (no solo `ruta_str`) para
+        # que un mismo archivo físico reemplazado en su lugar (poco común,
+        # pero posible entre 02_en_proceso y 03_procesados) nunca sirva un
+        # render obsoleto — ver GestorArchivos.
+        buffer = Path(ruta_str).read_bytes()
+        return renderizar_pagina(buffer, numero=numero)
+
+    @app.get("/pdf/{doc_id}/pagina/{numero}.png")
+    def servir_pagina_pdf(doc_id: str, numero: int):
+        documento = pipeline.repo.obtener(doc_id)
+        if documento is None:
+            raise HTTPException(status_code=404, detail="Documento no encontrado")
+        ruta = (configuracion.storage_root / documento.ruta_archivo_actual).resolve()
+        if not ruta.is_file():
+            raise HTTPException(status_code=404, detail="Archivo físico no disponible")
+        try:
+            png = _renderizar_pagina_cacheada(documento.sha256, str(ruta), numero)
+        except ErrorPdf as exc:
+            raise HTTPException(status_code=404, detail=exc.mensaje) from exc
+        return Response(content=png, media_type="image/png")
 
     @app.get("/pdf/{doc_id}")
     def servir_pdf(doc_id: str):

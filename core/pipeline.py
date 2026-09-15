@@ -273,7 +273,7 @@ class FlujoDocumental:
                 pistas_heuristicas = None
 
             try:
-                metadatos = self.extractor.extraer_de_paginas(
+                metadatos, ubicaciones = self.extractor.extraer_de_paginas(
                     paginas,
                     anio_contexto=datetime.now().year,
                     textos_ocr=textos_ocr,
@@ -288,6 +288,7 @@ class FlujoDocumental:
                 # documento en 04_errores. Excepción: un bloqueo de seguridad
                 # del proveedor NO se intenta sortear (ver _extraer_heuristico_respaldo).
                 metadatos = None
+                ubicaciones = None  # el respaldo heurístico no produce ubicaciones visuales
                 if exc.codigo != "CONTENIDO_BLOQUEADO_SEGURIDAD":
                     metadatos = self._extraer_heuristico_respaldo(registro, texto_capa, textos_ocr, exc)
                 if metadatos is None:
@@ -300,6 +301,7 @@ class FlujoDocumental:
                 EstadoDocumento.PENDIENTE_REVISION,
                 version_esperada=registro.version,
                 extraccion_metodo=metodo_extraccion,
+                ubicaciones=ubicaciones,
             )
             logger.info(
                 "Documento %s listo para revisión (oficio %s, %d páginas, método %s)",

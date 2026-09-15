@@ -189,6 +189,31 @@ def renderizar_paginas(
         doc.close()
 
 
+def renderizar_pagina(buffer: bytes, *, numero: int, dpi: int = 150) -> bytes:
+    """
+    Renderiza UNA sola página (1-indexada) a PNG — usada por el visor PDF
+    interactivo de la revisión HITL (ver main.py: ruta `/pdf/{id}/pagina/
+    {n}.png`), no por la inferencia de IA. Deliberadamente más liviana que
+    `renderizar_paginas`: sin lote, sin el post-procesado de contraste/
+    nitidez pensado para mejorar la lectura del modelo multimodal — aquí el
+    documento ya lo lee un humano sobre pantalla, donde el color e intensidad
+    originales son preferibles.
+
+    :raises ErrorPdf: con código PAGINA_FUERA_DE_RANGO si `numero` no existe.
+    """
+    doc = _abrir_pdf(buffer)
+    try:
+        if numero < 1 or numero > doc.page_count:
+            raise ErrorPdf(
+                "PAGINA_FUERA_DE_RANGO",
+                f"La página {numero} no existe (el documento tiene {doc.page_count})",
+            )
+        matriz = pymupdf.Matrix(dpi / 72, dpi / 72)
+        return doc.load_page(numero - 1).get_pixmap(matrix=matriz, alpha=False).tobytes("png")
+    finally:
+        doc.close()
+
+
 def extraer_texto_capa(buffer: bytes, *, max_paginas: int = 10) -> dict[int, str]:
     """
     Extrae la capa de texto EMBEBIDA del PDF (sin OCR, sin dependencias

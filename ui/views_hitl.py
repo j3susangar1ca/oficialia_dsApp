@@ -5,25 +5,37 @@ ui/views_hitl.py — Revisión asistida Human-in-the-Loop (split-screen 50/50).
 
 Migración del `HitlReviewView.svelte` original:
 
-    - Panel izquierdo: visor de PDF integrado y persistente (sirve el archivo actual del
-      documento vía la ruta `/pdf/{id}` registrada en main.py) con
-      navegación de páginas y apertura en pestaña nueva.
+    - Panel izquierdo: visor de páginas renderizadas del documento (sirve
+      imágenes individuales vía `/pdf/{id}/pagina/{n}.png`, registrada en
+      main.py) con navegación de páginas, apertura en pestaña nueva y
+      RESALTADO INTERACTIVO: al enfocar un campo del formulario, la zona
+      del PDF donde la IA lo localizó se ilumina automáticamente (ver
+      `_panel_visor`/`_resaltar_campo`, coordenadas de
+      `core.models.UbicacionesCampos` producidas por `core.ai_extractor`) —
+      evita buscar manualmente el dato en documentos densos o escaneados.
     - Panel derecho: formulario reactivo precargado con la extracción de
       la IA, validación en vivo campo a campo (mismas reglas del contrato
       `MetadatosOficio`) y acciones operativas:
-        [Confirmar y Registrar] → nomenclatura canónica + JSON espejo + RPA
-        [Descartar]             → estado terminal, archivo aislado en 04_errores
-        [Reintentar RPA]        → reinyección en ERROR_RPA (sin reextraer)
+        [Confirmar y Registrar]  → nomenclatura canónica + JSON espejo + RPA
+        [Aprobar y Siguiente]    → igual que confirmar, pero encadena
+                                    automáticamente el siguiente documento
+                                    PENDIENTE_REVISION (modo carrusel: revisión
+                                    continua sin volver a la bandeja general
+                                    entre un oficio y el siguiente)
+        [Descartar]              → estado terminal, archivo aislado en 04_errores
+        [Reintentar RPA]         → reinyección en ERROR_RPA (sin reextraer)
     - Banners de contexto: ERROR_RPA (con motivo y reintento), COMPLETADO
       (folio de acuse + evidencia) y DESCARTADO (motivo auditable).
-    - Atajos seguros: Alt+A confirma y Alt+R abre el descarte, sin interferir
-      con la captura dentro de los campos del formulario.
+    - Atajos seguros: Alt+A confirma, Alt+N aprueba y pasa al siguiente
+      (modo carrusel) y Alt+R abre el descarte, sin interferir con la
+      captura dentro de los campos del formulario.
     - Mientras el documento está EJECUTANDO_RPA, la página se auto-refresca
       para mostrar el desenlace sin intervención manual.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Callable, Optional
 
@@ -215,11 +227,13 @@ def pagina_revision(doc_id: str) -> None:
             await acciones["aprobar"]()
         elif tecla == "r" and "rechazar" in acciones:
             acciones["rechazar"]()
+        elif tecla == "n" and "siguiente" in acciones:
+            await acciones["siguiente"]()
 
-    # Los atajos (Alt+A confirmar, Alt+R descartar) ya se anuncian con
-    # tooltip() en los propios botones de acción — un indicador flotante
-    # aparte terminaba superpuesto sobre "Confirmar y Registrar"
-    # (detectado al verificar esta pantalla en navegador).
+    # Los atajos (Alt+A confirmar, Alt+R descartar, Alt+N aprobar y siguiente)
+    # ya se anuncian con tooltip() en los propios botones de acción — un
+    # indicador flotante aparte terminaba superpuesto sobre "Confirmar y
+    # Registrar" (detectado al verificar esta pantalla en navegador).
     ui.keyboard(_atajo_revision, repeating=False)
 
     # Auto-refresco mientras el RPA corre en segundo plano.
@@ -228,52 +242,156 @@ def pagina_revision(doc_id: str) -> None:
 
 
 # ----------------------------------------------------------------------
-# Panel izquierdo: visor de PDF integrado
+# Panel izquierdo: visor de PDF integrado con resaltado interactivo
 # ----------------------------------------------------------------------
 def _panel_visor(documento: DocumentoRegistro) -> None:
-    pagina_actual: dict = {"numero": 1}
-    total_paginas = documento.preproceso.num_paginas if documento.preproceso else 1
+    """
+    Visor de páginas renderizadas (`/pdf/{id}/pagina/{n}.png`, ver main.py)
+    en vez del <iframe> nativo anterior: necesario para poder dibujar un
+    recuadro de resaltado posicionado por porcentaje sobre la imagen cuando
+    el revisor enfoca un campo del formulario (ver `_resaltar_campo`/
+    `_quitar_resaltado` y el enganche en `_panel_formulario._campo`) — un
+    <iframe> con el visor nativo del navegador no permite superponer nada.
 
-    def _marco_html(numero: int) -> str:
-        """Iframe del visor (navegación por fragmento #page=N del visor nativo)."""
-        return (
-            f'<iframe src="/pdf/{documento.id}#page={numero}&view=FitH" '
-            'style="width:100%;height:100%;border:0;background:#f1f5f9" loading="eager" '
-            'title="Visor de documento"></iframe>'
-        )
+    Paginación y resaltado corren enteramente en el cliente (JavaScript
+    embebido) para que cambiar de campo no dispare una vuelta al servidor;
+    Python solo necesita disparar `window.__oficialiaVisor[doc_id].resaltar(
+    clave)` vía `ui.run_javascript` (ver funciones al final del módulo).
+    """
+    total_paginas = documento.preproceso.num_paginas if documento.preproceso else 1
+    doc_id = documento.id
+
+    cajas: dict[str, dict] = {}
+    if documento.ubicaciones_campos is not None:
+        for campo, caja in documento.ubicaciones_campos.model_dump().items():
+            if caja is not None:
+                cajas[campo] = caja
+
+    marco = f"""
+    <div style="display:flex;flex-direction:column;gap:8px;height:100%;min-height:0;">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:nowrap;
+                  width:100%;padding:4px 8px;background:#fff;border-radius:8px;
+                  border:1px solid #e2e8f0;">
+        <div style="display:flex;align-items:center;gap:2px;">
+          <button id="visor-prev-{doc_id}" title="Página anterior" class="visor-boton-{doc_id}">
+            <span class="material-icons" style="font-size:18px;">chevron_left</span>
+          </button>
+          <span id="visor-etiqueta-{doc_id}" style="font-size:12px;font-weight:500;color:#475569;
+                min-width:88px;text-align:center;">Pág. 1 / {total_paginas}</span>
+          <button id="visor-next-{doc_id}" title="Página siguiente" class="visor-boton-{doc_id}">
+            <span class="material-icons" style="font-size:18px;">chevron_right</span>
+          </button>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:10.5px;font-weight:600;text-transform:uppercase;
+                letter-spacing:.05em;color:#94a3b8;">Documento</span>
+          <a href="/pdf/{doc_id}" target="_blank" rel="noopener"
+             style="font-size:12px;color:#1d4ed8;font-weight:500;text-decoration:none;">
+            Abrir en pestaña nueva
+          </a>
+        </div>
+      </div>
+      <div id="visor-contenedor-{doc_id}" style="position:relative;flex:1;min-height:0;
+           overflow:auto;border-radius:8px;border:1px solid #e2e8f0;background:#f1f5f9;">
+        <img id="visor-img-{doc_id}" src="/pdf/{doc_id}/pagina/1.png"
+             style="width:100%;display:block;">
+        <div id="visor-resalte-{doc_id}" hidden style="position:absolute;
+             border:2px solid #f59e0b;background:rgba(245,158,11,.22);border-radius:3px;
+             box-shadow:0 0 0 3px rgba(245,158,11,.18);pointer-events:none;
+             transition:top .15s ease-out,left .15s ease-out,width .15s ease-out,
+             height .15s ease-out,opacity .15s ease-out;"></div>
+      </div>
+      <style>
+        .visor-boton-{doc_id} {{
+          display:flex;align-items:center;justify-content:center;width:28px;height:28px;
+          border:none;background:transparent;border-radius:6px;cursor:pointer;color:#1d4ed8;
+        }}
+        .visor-boton-{doc_id}:hover {{ background:#eff6ff; }}
+        .visor-boton-{doc_id}:disabled {{ color:#cbd5e1;cursor:default;background:transparent; }}
+      </style>
+    </div>
+    """
+
+    # El comportamiento va por separado vía ui.run_javascript (no como un
+    # <script> embebido en el HTML de arriba): ui.html() inserta su
+    # contenido por innerHTML, y un <script> insertado así el navegador
+    # NUNCA lo ejecuta (restricción estándar del DOM) — de hecho ui.html()
+    # rechaza de plano cualquier contenido con "</script>". run_javascript,
+    # en cambio, evalúa el código directamente en el cliente, así que sí
+    # corre; se dispara justo después de insertar el marco de arriba, con
+    # el mismo doc_id como llave para no chocar con el visor de otra pestaña.
+    guion = f"""
+    (function() {{
+      const docId = {json.dumps(doc_id)};
+      const total = {total_paginas};
+      const cajas = {json.dumps(cajas)};
+      let pagina = 1;
+      const img = document.getElementById("visor-img-" + docId);
+      const resalte = document.getElementById("visor-resalte-" + docId);
+      const etiqueta = document.getElementById("visor-etiqueta-" + docId);
+      const btnPrev = document.getElementById("visor-prev-" + docId);
+      const btnNext = document.getElementById("visor-next-" + docId);
+
+      function pintarBotones() {{
+        btnPrev.disabled = pagina <= 1;
+        btnNext.disabled = pagina >= total;
+      }}
+
+      function ir(delta) {{
+        const objetivo = pagina + delta;
+        if (objetivo < 1 || objetivo > total) return;
+        pagina = objetivo;
+        img.src = "/pdf/" + docId + "/pagina/" + pagina + ".png";
+        etiqueta.textContent = "Pág. " + pagina + " / " + total;
+        resalte.hidden = true;
+        pintarBotones();
+      }}
+
+      function resaltar(clave) {{
+        const caja = cajas[clave];
+        if (!caja) {{ resalte.hidden = true; return; }}
+        if (caja.pagina !== pagina) {{ ir(caja.pagina - pagina); }}
+        const x0 = Math.min(caja.x0, caja.x1), x1 = Math.max(caja.x0, caja.x1);
+        const y0 = Math.min(caja.y0, caja.y1), y1 = Math.max(caja.y0, caja.y1);
+        resalte.style.left = (x0 * 100) + "%";
+        resalte.style.top = (y0 * 100) + "%";
+        resalte.style.width = ((x1 - x0) * 100) + "%";
+        resalte.style.height = ((y1 - y0) * 100) + "%";
+        resalte.hidden = false;
+        resalte.scrollIntoView({{block: "center", inline: "center", behavior: "smooth"}});
+      }}
+
+      function quitarResalte() {{ resalte.hidden = true; }}
+
+      btnPrev.addEventListener("click", () => ir(-1));
+      btnNext.addEventListener("click", () => ir(1));
+      pintarBotones();
+
+      window.__oficialiaVisor = window.__oficialiaVisor || {{}};
+      window.__oficialiaVisor[docId] = {{ ir: ir, resaltar: resaltar, quitarResalte: quitarResalte }};
+    }})();
+    """
 
     with ui.column().classes("w-full h-full no-wrap gap-2 q-pa-sm bg-slate-50"):
-        with ui.row().classes(
-            "items-center justify-between no-wrap w-full q-px-sm q-py-xs bg-white "
-            "rounded-lg border border-slate-200"
-        ):
-            with ui.row().classes("items-center gap-1"):
-                ui.button(icon="chevron_left").props("flat round dense").bind_enabled_from(
-                    pagina_actual, "numero", backward=lambda n: n > 1
-                ).on_click(lambda: _mover_pagina(-1))
-                ui.label().classes("text-xs font-medium text-slate-600").bind_text_from(
-                    pagina_actual, "numero", backward=lambda n: f"Pág. {n} / {total_paginas}"
-                )
-                ui.button(icon="chevron_right").props("flat round dense").bind_enabled_from(
-                    pagina_actual, "numero", backward=lambda n: n < total_paginas
-                ).on_click(lambda: _mover_pagina(1))
-            with ui.row().classes("items-center gap-2"):
-                ui.label("Documento").classes(
-                    "text-[10.5px] font-semibold uppercase tracking-wider text-slate-400"
-                )
-                ui.link("Abrir en pestaña nueva", f"/pdf/{documento.id}", new_tab=True).classes(
-                    "text-xs text-primary font-medium"
-                )
+        ui.html(marco).classes("w-full h-full").style("min-height:0")
+    ui.run_javascript(guion)
 
-        visor = ui.html(_marco_html(1)).classes(
-            "w-full flex-1 rounded-lg border border-slate-200 overflow-hidden bg-slate-100 shadow-sm"
-        ).style("min-height:0")
 
-        def _mover_pagina(delta: int) -> None:
-            objetivo = pagina_actual["numero"] + delta
-            if 1 <= objetivo <= total_paginas:
-                pagina_actual["numero"] = objetivo
-                visor.set_content(_marco_html(objetivo))
+def _resaltar_campo(doc_id: str, clave: str) -> None:
+    """Pide al visor (JS embebido en `_panel_visor`) resaltar el origen
+    visual de `clave` — no-op si el documento no trae ubicación para ese
+    campo (ver `cajas` en `_panel_visor`)."""
+    ui.run_javascript(
+        f"window.__oficialiaVisor && window.__oficialiaVisor[{json.dumps(doc_id)}] "
+        f"&& window.__oficialiaVisor[{json.dumps(doc_id)}].resaltar({json.dumps(clave)})"
+    )
+
+
+def _quitar_resaltado(doc_id: str) -> None:
+    ui.run_javascript(
+        f"window.__oficialiaVisor && window.__oficialiaVisor[{json.dumps(doc_id)}] "
+        f"&& window.__oficialiaVisor[{json.dumps(doc_id)}].quitarResalte()"
+    )
 
 
 # ----------------------------------------------------------------------
@@ -341,6 +459,12 @@ def _panel_formulario(
             entrada.props("dense outlined color=primary")
         entrada.classes("w-full")
         entrada.bind_value_to(borrador, clave)
+        # Resaltado interactivo en el visor PDF (ver _panel_visor/_resaltar_campo):
+        # al enfocar el campo se ilumina la zona donde la IA lo localizó, sin
+        # obligar al revisor a buscarlo manualmente en un documento denso o
+        # escaneado; args=[] evita mandar la carga completa del evento al server.
+        entrada.on("focus", lambda _=None, c=clave: _resaltar_campo(documento.id, c), [])
+        entrada.on("blur", lambda _=None: _quitar_resaltado(documento.id), [])
         entradas[clave] = entrada
         return entrada
 
@@ -401,8 +525,18 @@ def _panel_formulario(
                     ).on_click(lambda: _abrir_dialogo_descartar()).tooltip("Alt+R")
 
                     ui.button("Confirmar y Registrar", icon="task_alt").props(
+                        "color=primary outline no-caps"
+                    ).on_click(lambda: _confirmar()).tooltip("Alt+A — se queda en este documento")
+
+                    # Modo carrusel: confirma y carga automáticamente el siguiente
+                    # PENDIENTE_REVISION (ver RepositorioDocumentos.siguiente_pendiente),
+                    # sin obligar al revisor a volver a la bandeja general entre un
+                    # oficio y el siguiente — flujo de concentración continua.
+                    ui.button("Aprobar y Siguiente", icon="skip_next").props(
                         "color=primary no-caps"
-                    ).on_click(lambda: _confirmar()).tooltip("Alt+A")
+                    ).on_click(lambda: _confirmar_y_siguiente()).tooltip(
+                        "Alt+N — confirma y carga automáticamente el siguiente pendiente"
+                    )
 
             if not editable and (bloqueo is None or bloqueo.adquirido):
                 # Si no es editable POR EL BLOQUEO, el banner de arriba ya
@@ -435,12 +569,16 @@ def _panel_formulario(
             datos["plazo_dias"] = int(float(plazo))
         return datos
 
-    async def _confirmar() -> None:
+    async def _validar_y_confirmar() -> Optional[DocumentoRegistro]:
+        """Valida + confirma + libera el bloqueo propio; base compartida de
+        `_confirmar()` y `_confirmar_y_siguiente()` — solo difiere adónde
+        navegan después. Devuelve None (y ya notificó el motivo) si la
+        validación o la confirmación fallaron."""
         try:
             metadatos = MetadatosOficio.model_validate(_recolectar_datos())
         except Exception as exc:  # noqa: BLE001 — ValidationError de Pydantic
             ui.notify(f"Revise los campos marcados: {exc}", type="negative", position="top")
-            return
+            return None
 
         try:
             documento_actualizado = await run.io_bound(
@@ -449,15 +587,42 @@ def _panel_formulario(
         except Exception as exc:  # noqa: BLE001
             logger.exception("Fallo al confirmar %s", documento.id)
             ui.notify(f"No se pudo confirmar: {exc}", type="negative", position="top")
-            return
+            return None
 
         _liberar_bloqueo_propio()
+        return documento_actualizado
+
+    async def _confirmar() -> None:
+        documento_actualizado = await _validar_y_confirmar()
+        if documento_actualizado is None:
+            return
         ui.notify(
             f"Registrado: {documento_actualizado.nombre_archivo_canonico}. RPA en ejecución…",
             type="positive",
             position="top",
         )
         ui.navigate.to(f"/revision/{documento.id}")
+
+    async def _confirmar_y_siguiente() -> None:
+        documento_actualizado = await _validar_y_confirmar()
+        if documento_actualizado is None:
+            return
+        siguiente = pipeline.repo.siguiente_pendiente(documento.id)
+        if siguiente is not None:
+            ui.notify(
+                f"Registrado: {documento_actualizado.nombre_archivo_canonico}. Siguiente documento cargado.",
+                type="positive",
+                position="top",
+            )
+            ui.navigate.to(f"/revision/{siguiente.id}")
+        else:
+            ui.notify(
+                f"Registrado: {documento_actualizado.nombre_archivo_canonico}. "
+                "No hay más documentos pendientes por revisar.",
+                type="positive",
+                position="top",
+            )
+            ui.navigate.to("/")
 
     def _abrir_dialogo_descartar() -> None:
         with ui.dialog() as dialogo, ui.card().classes("gap-3 q-pa-md"):
@@ -507,7 +672,11 @@ def _panel_formulario(
 
     acciones: dict[str, Callable] = {}
     if editable:
-        acciones = {"aprobar": _confirmar, "rechazar": _abrir_dialogo_descartar}
+        acciones = {
+            "aprobar": _confirmar,
+            "rechazar": _abrir_dialogo_descartar,
+            "siguiente": _confirmar_y_siguiente,
+        }
     return acciones
 
 

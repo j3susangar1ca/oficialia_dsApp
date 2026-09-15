@@ -4,7 +4,8 @@ SISTEMA OFICIALIA-DIGITAL-DSA (reconstrucción 100% Python)
 core/ai_extractor.py — Extracción estructurada con Gemini 2.5 Flash.
 
 Puerta única al proveedor de IA mediante el SDK oficial `google-genai`,
-con tipado estricto Pydantic v2 (`MetadatosOficio` como response_schema).
+con tipado estricto Pydantic v2 (`ExtraccionOficio` —metadatos + ubicaciones
+visuales opcionales por campo, ver core.models— como response_schema).
 El system prompt institucional parte del original
 (`infrastructure/ai/prompts/systemPromptExtraccionOficios.ts`, fuente
 canónica `docs/system_prompt.md`) y se le añade la sección [2.9] de
@@ -41,6 +42,12 @@ Mejoras incorporadas sobre el adaptador original:
       remitente muy corto). Es deliberadamente de solo-lectura: el reporte
       HITL debe reflejar lo que el modelo realmente devolvió, nunca un
       valor corregido en silencio.
+    - Ubicaciones visuales por campo ([7.5] del prompt, `UbicacionesCampos`):
+      además de metadatos, la IA reporta el rectángulo delimitador donde
+      localizó cada dato en la imagen (cuando pudo hacerlo). `extraer_de_
+      paginas` devuelve ahora (metadatos, ubicaciones) — el visor HITL
+      (ui/views_hitl.py) usa esas coordenadas para resaltar el origen del
+      campo en el PDF al enfocarlo en el formulario.
 """
 
 from __future__ import annotations
@@ -51,7 +58,7 @@ from datetime import datetime
 from typing import Optional
 
 from core.heuristic_extractor import PistaHeuristica
-from core.models import MetadatosOficio
+from core.models import ExtraccionOficio, MetadatosOficio, UbicacionesCampos
 from core.pdf_engine import PaginaRenderizada
 
 logger = logging.getLogger("oficialia.ia")
@@ -124,11 +131,21 @@ Criterio de decisión: este indicador activa el proceso de anonimización poster
 [7. SÍNTESIS DEL ASUNTO]
 Redacte el campo asunto como UN párrafo continuo de 1 a 3 líneas (entre 10 y 60 palabras), en tercera persona y tono administrativo neutro, sin comillas, sin viñetas y sin saltos de línea. Debe expresar: qué se comunica o solicita, quién lo promueve y, si existen, las referencias temporales o de expediente relevantes. Si el documento contiene una línea impresa de "Asunto", condésela conservando íntegro su sentido; si carece de ella, sintetice el cuerpo del documento.
 
+[7.5. UBICACIÓN VISUAL DE LOS CAMPOS (BOUNDING BOXES)]
+Además del objeto metadatos, reporte un objeto ubicaciones: para cada campo de metadatos que haya podido LOCALIZAR VISUALMENTE en una de las páginas adjuntas (numero_oficio, fecha_emision, dependencia_area, remitente_nombre, remitente_cargo, destinatario_nombre, destinatario_cargo, asunto, plazo_dias), indique el rectángulo delimitador que encierra ajustadamente ese texto de origen:
+a) pagina: número de página (1-indexado, en el mismo orden natural en que se adjuntaron las imágenes) donde aparece el texto.
+b) x0, y0: esquina superior izquierda del rectángulo, como fracción del ancho/alto de ESA página (0.0 = borde izquierdo/superior, 1.0 = borde derecho/inferior).
+c) x1, y1: esquina inferior derecha del rectángulo, en las mismas unidades fraccionarias (siempre x1 > x0 y y1 > y0).
+Reglas:
+    - Omita (deje sin valor) cualquier campo cuyo dato provenga de un valor de contingencia sin origen visual identificable ("S/N", "NO ESPECIFICADO", "ILEGIBLE" o ausencia de término/plazo_dias null); nunca invente una ubicación para un valor que no leyó en la imagen.
+    - El rectángulo debe encerrar el texto fuente real (p. ej. el bloque del folio o el nombre bajo la rúbrica), nunca una región aproximada, una línea completa irrelevante o el membrete entero.
+    - Estas coordenadas son auxiliares para la interfaz de revisión humana (resaltado visual del origen del dato); nunca alteran, sustituyen ni tienen precedencia sobre el valor textual reportado en metadatos.
+
 [8. RESTRICCIÓN DE FORMATO DE SALIDA — INNEGOCIABLE]
-8.1. Responda EXCLUSIVAMENTE con el objeto JSON del esquema MetadatosOficio. Queda prohibido todo texto previo o posterior, delimitadores de bloque de código, comentarios, notas de confianza, explicaciones o campos adicionales.
-8.2. Emita SIEMPRE los once campos del esquema, en el orden definido, aunque deba recurrir a los valores de contingencia ("S/N", "NO ESPECIFICADO", "ILEGIBLE", null).
-8.3. Respete los tipos exactos: cadenas de texto sin saltos de línea; fecha_emision con el patrón YYYY-MM-DD; plazo_dias como entero o null; contiene_datos_sensibles como booleano.
-8.4. No altere los nombres de las claves ni agregue claves nuevas al objeto.
+8.1. Responda EXCLUSIVAMENTE con el objeto JSON del esquema solicitado (metadatos + ubicaciones). Queda prohibido todo texto previo o posterior, delimitadores de bloque de código, comentarios, notas de confianza, explicaciones o campos adicionales.
+8.2. Dentro de metadatos, emita SIEMPRE los once campos del esquema, en el orden definido, aunque deba recurrir a los valores de contingencia ("S/N", "NO ESPECIFICADO", "ILEGIBLE", null).
+8.3. Respete los tipos exactos: cadenas de texto sin saltos de línea; fecha_emision con el patrón YYYY-MM-DD; plazo_dias como entero o null; contiene_datos_sensibles como booleano; en ubicaciones, x0/y0/x1/y1 como números entre 0 y 1 y pagina como entero positivo.
+8.4. No altere los nombres de las claves ni agregue claves nuevas a ninguno de los dos objetos.
 
 [9. INTEGRIDAD DOCUMENTAL — PROHIBICIÓN DE ALUCINACIÓN]
 9.1. Transcriba únicamente lo que sea visible o razonablemente legible en las imágenes. Está prohibido completar información con conocimiento externo, suposiciones sobre formatos institucionales o memoria de casos anteriores.
@@ -170,7 +187,7 @@ class ExtractorMetadatos:
         anio_contexto: int,
         textos_ocr: Optional[dict[int, str]] = None,
         pistas_heuristicas: Optional[PistaHeuristica] = None,
-    ) -> MetadatosOficio:
+    ) -> tuple[MetadatosOficio, UbicacionesCampos]:
         """
         Ejecuta la inferencia multimodal sobre las páginas renderizadas.
 
@@ -186,6 +203,10 @@ class ExtractorMetadatos:
             modelo debe confirmarlos o refutarlos contra la imagen, nunca
             transcribirlos a ciegas—; campos sin candidato (`None`) se
             omiten del bloque.
+        :returns: (metadatos, ubicaciones) — `ubicaciones` trae, campo por
+            campo, el rectángulo delimitador (bounding box) opcional donde la
+            IA localizó ese dato en la imagen (ver core.models.UbicacionesCampos),
+            usado por el visor HITL para el resaltado interactivo.
         :raises ErrorExtraccionIA: cuando el proveedor no está configurado o
             la respuesta viola el contrato (mapeado del enum original).
         """
@@ -217,7 +238,7 @@ class ExtractorMetadatos:
             system_instruction=SYSTEM_PROMPT_EXTRACCION_OFICIOS,
             temperature=0.0,
             response_mime_type="application/json",
-            response_schema=MetadatosOficio,
+            response_schema=ExtraccionOficio,
         )
 
         ultimo_error: Optional[Exception] = None
@@ -228,7 +249,7 @@ class ExtractorMetadatos:
                     model=self.modelo, contents=contenido, config=config
                 )
                 duracion_ms = int(round((time.perf_counter() - inicio) * 1000))
-                metadatos = self._interpretar_respuesta(respuesta)
+                metadatos, ubicaciones = self._interpretar_respuesta(respuesta)
                 uso = getattr(respuesta, "usage_metadata", None)
                 logger.info(
                     "Extracción OK (%s): %d páginas, %d ms, prompt=%s tokens, salida=%s tokens",
@@ -238,7 +259,7 @@ class ExtractorMetadatos:
                     getattr(uso, "prompt_token_count", "?"),
                     getattr(uso, "candidates_token_count", "?"),
                 )
-                return metadatos
+                return metadatos, ubicaciones
             except ErrorExtraccionIA as exc:
                 # Los errores de contrato (schema/JSON) no se reintentan:
                 # son deterministas a temperatura 0.
@@ -320,12 +341,12 @@ class ExtractorMetadatos:
         partes.append(
             types.Part.from_text(
                 text="TAREA: aplique íntegramente el protocolo institucional y devuelva únicamente "
-                "el objeto JSON MetadatosOficio."
+                "el objeto JSON solicitado (metadatos + ubicaciones)."
             )
         )
         return partes
 
-    def _interpretar_respuesta(self, respuesta) -> MetadatosOficio:
+    def _interpretar_respuesta(self, respuesta) -> tuple[MetadatosOficio, UbicacionesCampos]:
         """Valida la candidata y la normaliza al contrato de dominio (doble capa)."""
         import json
 
@@ -354,16 +375,16 @@ class ExtractorMetadatos:
                 "JSON_MALFORMADO", "La respuesta del modelo no es JSON parseable", exc
             ) from exc
 
-    def _validar_contrato(self, datos: dict) -> MetadatosOficio:
+    def _validar_contrato(self, datos: dict) -> tuple[MetadatosOficio, UbicacionesCampos]:
         """Revalida y normaliza (mayúsculas, sanitización de folio, etc.)."""
         try:
-            metadatos = MetadatosOficio.model_validate(datos)
+            extraccion = ExtraccionOficio.model_validate(datos)
         except Exception as exc:  # noqa: BLE001 — ValidationError de Pydantic
             raise ErrorExtraccionIA(
-                "SCHEMA_INVALIDO", f"El JSON viola el contrato MetadatosOficio: {exc}", exc
+                "SCHEMA_INVALIDO", f"El JSON viola el contrato de extracción: {exc}", exc
             ) from exc
-        self._revisar_heuristicas(metadatos)
-        return metadatos
+        self._revisar_heuristicas(extraccion.metadatos)
+        return extraccion.metadatos, extraccion.ubicaciones
 
     @staticmethod
     def _revisar_heuristicas(metadatos: MetadatosOficio) -> None:
