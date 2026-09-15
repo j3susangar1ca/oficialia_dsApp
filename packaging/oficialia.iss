@@ -29,6 +29,14 @@
 ;     (ver sección [Code]) — nadie tiene que abrir Notepad a mano. Si el
 ;     .env ya trae esas claves capturadas (reinstalación/actualización), la
 ;     página se omite sola: no se vuelven a pedir.
+;   - Si quien compila el instalador definió GEMINI_API_KEY en su entorno
+;     (variable local o secreto de GitHub Actions — ver
+;     build_windows.ps1), esa clave real ya viene escrita en el .env de
+;     CADA instalación nueva desde el paso [Files] de más abajo, así que en
+;     la práctica ninguna PC de usuario final necesita capturarla: el campo
+;     del asistente puede dejarse tal cual. La plantilla del repositorio
+;     (.env.example) NUNCA lleva la clave real — solo la copia temporal
+;     generada durante el build.
 ; ============================================================================
 
 #define MyAppName "Oficialía Digital DSA"
@@ -37,6 +45,14 @@
 #define MyAppExeName "OficialiaDigitalDSA.exe"
 #define MyDistDir "..\dist\OficialiaDigitalDSA"
 #define MyDataDirName "OficialiaDigitalDSA"
+; Clave real tomada de la variable de entorno GEMINI_API_KEY de la máquina
+; que COMPILA el instalador (nunca del repositorio) — ver
+; packaging\build_windows.ps1 y .github\workflows\build-windows-installer.yml.
+; Vacía si nadie la definió: el asistente simplemente pedirá la clave como
+; hasta ahora. Sirve solo para prellenar el campo del asistente (ver
+; InitializeWizard); el valor real ya queda escrito en el .env desplegado
+; por el paso [Files] de más abajo, que toma ..\.env.example directamente.
+#define DefaultGeminiApiKey GetEnv("GEMINI_API_KEY")
 
 [Setup]
 AppId={{D5724293-2990-4D78-9C11-1E406A1DE0B2}
@@ -232,6 +248,14 @@ begin
   PaginaCredenciales.Add('Usuario de la Intranet (RPA_USUARIO):', False);
   PaginaCredenciales.Add('Contraseña de la Intranet (RPA_PASSWORD):', True);
   PaginaCredenciales.Values[IdxGeminiApiKey] := LeerValorEnv('GEMINI_API_KEY');
+  // Instalación nueva sin .env todavía: si este instalador se compiló con
+  // una GEMINI_API_KEY por defecto (ver DefaultGeminiApiKey arriba), se
+  // prellena aquí solo para que el campo no se vea vacío — el valor real ya
+  // quedó escrito en el .env desplegado por [Files] antes de llegar a esta
+  // página. Dejar el campo tal cual (sin tocarlo) es suficiente: no vuelve a
+  // pedirse nada en esta PC.
+  if PaginaCredenciales.Values[IdxGeminiApiKey] = '' then
+    PaginaCredenciales.Values[IdxGeminiApiKey] := '{#DefaultGeminiApiKey}';
   PaginaCredenciales.Values[IdxRpaUsuario] := LeerValorEnv('RPA_USUARIO');
   if PaginaCredenciales.Values[IdxRpaUsuario] = '' then
     PaginaCredenciales.Values[IdxRpaUsuario] := '2010226';

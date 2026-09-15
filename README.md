@@ -535,6 +535,17 @@ una instalación previa), la página se omite sola en una reinstalación/actuali
 variables (SMB, Sheets, timeouts…) se sigue ajustando a mano desde el acceso directo
 "Configuración avanzada (.env)" del menú Inicio.
 
+**`GEMINI_API_KEY` de fábrica (ninguna PC la pide ni se edita a mano):** defina el secreto
+`GEMINI_API_KEY` del repositorio en GitHub (Settings → Secrets and variables → Actions → New
+repository secret) con su clave real de Gemini. El workflow
+(`.github/workflows/build-windows-installer.yml`) se la pasa a `packaging/build_windows.ps1`, que
+la incrusta *solo en el instalador generado* (nunca en git: la plantilla `.env.example` del
+repositorio se restaura sin la clave al terminar el build). Con eso, toda instalación nueva queda
+funcional desde el primer arranque, y las PC que ya estaban instaladas con la clave vacía se
+auto-reparan solas al actualizar (ver `config.py::_reparar_gemini_api_key_faltante`). Para un
+build local con la misma clave incrustada: `$env:GEMINI_API_KEY = "..."` antes de correr
+`.\packaging\build_windows.ps1` (solo en su sesión de PowerShell, nunca en un archivo).
+
 ## Estructura del repositorio
 
 ```text

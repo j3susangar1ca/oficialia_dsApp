@@ -40,6 +40,13 @@ jobs:
       - name: Compilar instalador
         run: .\packaging\build_windows.ps1
         shell: powershell
+        env:
+          # Secreto del repositorio (Settings → Secrets and variables →
+          # Actions → New repository secret, nombre GEMINI_API_KEY). Si no
+          # existe, el paso simplemente no la define y el instalador se
+          # genera igual que antes (sin clave por defecto) — ver
+          # packaging\build_windows.ps1.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
       - name: Subir artefacto
         uses: actions/upload-artifact@v7
