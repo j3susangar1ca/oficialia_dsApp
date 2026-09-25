@@ -24,8 +24,16 @@ Migración del `HitlReviewView.svelte` original:
                                     entre un oficio y el siguiente)
         [Descartar]              → estado terminal, archivo aislado en 04_errores
         [Reintentar RPA]         → reinyección en ERROR_RPA (sin reextraer)
-    - Banners de contexto: ERROR_RPA (con motivo y reintento), COMPLETADO
-      (folio de acuse + evidencia) y DESCARTADO (motivo auditable).
+        [Confirmar registro manual] → certifica a mano un folio que la
+                                    Intranet SÍ registró pero el detector
+                                    automático no capturó a tiempo (ver
+                                    core.pipeline.FlujoDocumental.
+                                    confirmar_registro_manual) — sin volver
+                                    a abrir el navegador ni reenviar el
+                                    formulario (evita un posible duplicado)
+    - Banners de contexto: ERROR_RPA (con motivo, reintento y confirmación
+      manual), COMPLETADO (folio de acuse + evidencia) y DESCARTADO (motivo
+      auditable).
     - Atajos seguros: Alt+A confirma, Alt+N aprueba y pasa al siguiente
       (modo carrusel) y Alt+R abre el descarte, sin interferir con la
       captura dentro de los campos del formulario.
@@ -542,7 +550,16 @@ def _panel_formulario(
                 if documento.estado == EstadoDocumento.ERROR_RPA:
                     ui.button("Reintentar RPA", icon="restart_alt").props(
                         "color=primary outline no-caps"
-                    ).on_click(lambda: _reintentar_rpa())
+                    ).on_click(lambda: _reintentar_rpa()).tooltip(
+                        "Vuelve a abrir el navegador y reenvía el formulario — úselo solo si la "
+                        "Intranet NO llegó a registrar el oficio"
+                    )
+                    ui.button("Confirmar registro manual", icon="fact_check").props(
+                        "color=positive outline no-caps"
+                    ).on_click(lambda: _abrir_dialogo_registro_manual()).tooltip(
+                        "Use esto si YA vio el folio en la Intranet — certifica el registro sin "
+                        "volver a enviar el formulario (evita un posible duplicado)"
+                    )
 
                 if editable:
                     ui.button("Descartar", icon="delete").props(
@@ -693,6 +710,45 @@ def _panel_formulario(
             ui.notify(f"No se pudo reintentar: {exc}", type="negative", position="top")
             return
         ui.notify("Reinyección en la Intranet en curso…", type="positive", position="top")
+        ui.navigate.to(f"/revision/{documento.id}")
+
+    def _abrir_dialogo_registro_manual() -> None:
+        with ui.dialog() as dialogo, ui.card().classes("gap-3 q-pa-md"):
+            ui.label("Confirmar registro manual").classes("text-sm font-semibold text-slate-700")
+            ui.label(
+                "Use esto SOLO si ya vio en la Intranet que el oficio quedó registrado (folio "
+                "visible en pantalla) — el documento pasará directo a COMPLETADO con el folio que "
+                "escriba abajo, sin volver a abrir el navegador ni reenviar el formulario."
+            ).classes("text-xs text-slate-500")
+            campo_folio = ui.input(
+                "Folio institucional (tal como aparece en la Intranet)",
+                placeholder="Ej. HCG-OP-2026-009821",
+            ).props("dense outlined color=primary").classes("w-full")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Cancelar").props("flat no-caps color=grey").on_click(dialogo.close)
+                ui.button("Confirmar registro", icon="fact_check").props(
+                    "color=positive no-caps"
+                ).on_click(lambda: _confirmar_registro_manual(dialogo, campo_folio))
+        dialogo.open()
+
+    async def _confirmar_registro_manual(dialogo, campo_folio) -> None:
+        folio = campo_folio.value.strip()
+        if not folio:
+            ui.notify("Escriba el folio institucional para confirmar.", type="warning", position="top")
+            return
+        dialogo.close()
+        try:
+            await run.io_bound(
+                pipeline.confirmar_registro_manual,
+                documento.id,
+                folio,
+                revisor["valor"].strip() or REVISOR_POR_DEFECTO,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Fallo al confirmar registro manual de %s", documento.id)
+            ui.notify(f"No se pudo confirmar: {exc}", type="negative", position="top")
+            return
+        ui.notify(f"Registro confirmado: folio {folio}.", type="positive", position="top")
         ui.navigate.to(f"/revision/{documento.id}")
 
     acciones: dict[str, Callable] = {}
@@ -955,6 +1011,7 @@ _ETIQUETA_ACCION = {
     "CONFIRMAR_LOTE": "Confirmó en lote",
     "DESCARTAR": "Descartó",
     "REINTENTAR_RPA": "Reintentó el registro RPA",
+    "CONFIRMAR_REGISTRO_MANUAL": "Certificó el registro a mano",
 }
 
 
@@ -1059,6 +1116,11 @@ def _banner_estado(documento: DocumentoRegistro) -> None:
                     ui.label(f"Evidencia del fallo: {documento.rpa.captura_acuse_path}").classes(
                         "text-[11px] text-rose-400"
                     )
+                ui.label(
+                    "¿El oficio SÍ quedó registrado en la Intranet (vio un folio en pantalla)? Use "
+                    "«Confirmar registro manual» en vez de «Reintentar RPA»: reintentar reenvía el "
+                    "formulario y puede duplicar el registro."
+                ).classes("text-[11px] text-rose-400 mt-1")
         return
 
     if estado == EstadoDocumento.COMPLETADO:

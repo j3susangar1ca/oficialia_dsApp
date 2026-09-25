@@ -106,7 +106,8 @@ CREATE TABLE IF NOT EXISTS auditoria_hitl (
     documento_id          TEXT NOT NULL REFERENCES documentos(id),
     revisor_usuario_id    TEXT NOT NULL,
     accion                TEXT NOT NULL
-        CHECK (accion IN ('CONFIRMAR', 'DESCARTAR', 'REINTENTAR_RPA', 'CONFIRMAR_LOTE')),
+        CHECK (accion IN ('CONFIRMAR', 'DESCARTAR', 'REINTENTAR_RPA', 'CONFIRMAR_LOTE',
+                          'CONFIRMAR_REGISTRO_MANUAL')),
     campos_modificados    TEXT,
     fecha                 TEXT NOT NULL
 );
@@ -255,10 +256,57 @@ def _migracion_4_a_5(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE documentos ADD COLUMN ubicaciones_json TEXT")
 
 
+def _migracion_5_a_6(conn: sqlite3.Connection) -> None:
+    """
+    v5 → v6: agrega 'CONFIRMAR_REGISTRO_MANUAL' a los valores permitidos de
+    `auditoria_hitl.accion` — usada por FlujoDocumental.confirmar_registro_
+    manual cuando el revisor certifica a mano que la Intranet SÍ registró el
+    oficio (folio visible en pantalla) aunque el RPA no lo haya detectado
+    automáticamente (ver rpa/playwright_rpa.py: la confirmación "¿Desea
+    registrarlo?" de la Intranet puede requerir validación manual del
+    operador, y esa validación puede resolverse sin que el detector
+    automático de folio llegue a leerlo a tiempo).
+
+    SQLite no permite alterar un CHECK ya definido con ALTER TABLE: se
+    reconstruye la tabla completa (patrón estándar de SQLite para este
+    caso — https://www.sqlite.org/lang_altertable.html, sección 7),
+    preservando cada fila existente. Ningún otro CHECK/columna cambia.
+    """
+    columnas_check = {
+        fila["sql"] for fila in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='auditoria_hitl'"
+        )
+    }
+    if any("CONFIRMAR_REGISTRO_MANUAL" in sql for sql in columnas_check if sql):
+        return  # ya migrada (idempotente ante reintentos de inicializar())
+    conn.execute("ALTER TABLE auditoria_hitl RENAME TO auditoria_hitl_v5")
+    conn.execute(
+        """
+        CREATE TABLE auditoria_hitl (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            documento_id          TEXT NOT NULL REFERENCES documentos(id),
+            revisor_usuario_id    TEXT NOT NULL,
+            accion                TEXT NOT NULL
+                CHECK (accion IN ('CONFIRMAR', 'DESCARTAR', 'REINTENTAR_RPA', 'CONFIRMAR_LOTE',
+                                  'CONFIRMAR_REGISTRO_MANUAL')),
+            campos_modificados    TEXT,
+            fecha                 TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO auditoria_hitl (id, documento_id, revisor_usuario_id, accion, campos_modificados, fecha) "
+        "SELECT id, documento_id, revisor_usuario_id, accion, campos_modificados, fecha FROM auditoria_hitl_v5"
+    )
+    conn.execute("DROP TABLE auditoria_hitl_v5")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_auditoria_documento ON auditoria_hitl(documento_id, fecha)")
+
+
 #: Migraciones en orden: `_MIGRACIONES[N]` lleva de la versión N a la N+1.
 #: `VERSION_ESQUEMA` (= len(_MIGRACIONES)) es la versión objetivo actual.
 _MIGRACIONES: list = [
     _migracion_0_a_1, _migracion_1_a_2, _migracion_2_a_3, _migracion_3_a_4, _migracion_4_a_5,
+    _migracion_5_a_6,
 ]
 VERSION_ESQUEMA: int = len(_MIGRACIONES)
 
