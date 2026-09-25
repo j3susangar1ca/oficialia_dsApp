@@ -315,7 +315,13 @@ class TestBloqueoConcurrente:
 
     def test_renovar_extiende_el_vencimiento(self, repositorio: RepositorioDocumentos):
         doc = repositorio.crear(_documento())
-        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=0.001)
+        # TTL inicial amplio a propósito (a diferencia de los tests de
+        # vencimiento de arriba/abajo): este test solo verifica que renovar
+        # EXTIENDA el vencimiento, no que uno vencido falle — un TTL de
+        # milisegundos aquí competiría con el propio round-trip a SQLite del
+        # renovar_bloqueo inmediato de abajo (sin sleep de por medio) y hacía
+        # el test flaky en runners más lentos (p. ej. windows-latest en CI).
+        repositorio.adquirir_bloqueo(doc.id, "ana", ttl_minutos=3)
         assert repositorio.renovar_bloqueo(doc.id, "ana", ttl_minutos=3) is True
         time.sleep(0.15)
 
