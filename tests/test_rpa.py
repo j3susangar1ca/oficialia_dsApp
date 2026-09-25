@@ -249,3 +249,100 @@ class TestResolverCveOficialia:
         marco = _MarcoFalso(datos_disponibles=False, total=0)
 
         assert rpa._resolver_cve_oficialia(marco) == ""
+
+
+class _DialogoFalso:
+    """Doble mínimo de `playwright.sync_api.Dialog`: solo lo que
+    `_registrar_manejador_dialogos` toca (type/message/accept/dismiss)."""
+
+    def __init__(self, tipo: str, message: str = ""):
+        self.type = tipo
+        self.message = message
+        self.accepted = False
+        self.dismissed = False
+
+    def accept(self, prompt_text: str = "") -> None:
+        self.accepted = True
+
+    def dismiss(self) -> None:
+        self.dismissed = True
+
+
+class _PaginaFalsaDialogo:
+    """Doble mínimo de `Page`: solo `.on("dialog", callback)` — distinto de
+    `_PaginaFalsa` (arriba, usado por TestAbrirSubmoduloIngreso)."""
+
+    def __init__(self):
+        self.callback = None
+
+    def on(self, evento: str, callback) -> None:
+        assert evento == "dialog"
+        self.callback = callback
+
+
+class TestManejadorDialogos:
+    """
+    _registrar_manejador_dialogos: regresión del bug reportado en
+    producción — el manejador aceptaba CUALQUIER diálogo nativo al
+    instante, incluido el confirm() "¿Desea registrarlo?" que la Intranet
+    muestra al enviar el formulario. Con RPA_HEADLESS=false (operador
+    presente frente a la ventana visible, el modo de esta instalación),
+    eso le ganaba la carrera al operador que quería revisar los datos del
+    formulario Webix antes de decidir: el operador terminaba cerrando el
+    diálogo y registrando el oficio a mano por fuera de este flujo, y la
+    app se quedaba sin folio (ver core.pipeline.FlujoDocumental.
+    confirmar_registro_manual, la vía de recuperación para ese caso).
+
+    Un alert() (el que informa el folio tras un registro ya decidido)
+    siempre se acepta de inmediato, en ambos modos: nunca es la pregunta
+    que requiere criterio humano.
+    """
+
+    def _instalar_manejador(self, configuracion, *, headless: bool):
+        cfg = configuracion.model_copy(update={"rpa_modo": "playwright", "rpa_headless": headless})
+        rpa = RpaIntranet(cfg)
+        pagina = _PaginaFalsaDialogo()
+        estado = rpa._registrar_manejador_dialogos(pagina)
+        return pagina, estado
+
+    def test_alert_se_acepta_de_inmediato_con_operador_presente(self, configuracion):
+        pagina, estado = self._instalar_manejador(configuracion, headless=False)
+        dialogo = _DialogoFalso("alert", "Oficio registrado con folio HCG-OP-2026-009821")
+
+        pagina.callback(dialogo)
+
+        assert dialogo.accepted is True
+        assert estado["folio"] == "HCG-OP-2026-009821"
+
+    def test_confirm_no_se_acepta_por_codigo_con_operador_presente(self, configuracion):
+        """RPA_HEADLESS=false: el confirm() se deja intacto para que el
+        operador decida Sí/No en la ventana real — el código no le gana
+        la carrera."""
+        pagina, estado = self._instalar_manejador(configuracion, headless=False)
+        dialogo = _DialogoFalso("confirm", "¿Desea registrarlo?")
+
+        pagina.callback(dialogo)
+
+        assert dialogo.accepted is False
+        assert dialogo.dismissed is False
+
+    def test_confirm_se_acepta_solo_en_automatizacion_desatendida(self, configuracion):
+        """RPA_HEADLESS=true: no hay operador que pueda decidir, así que
+        se conserva el comportamiento anterior (aceptar de inmediato)."""
+        pagina, estado = self._instalar_manejador(configuracion, headless=True)
+        dialogo = _DialogoFalso("confirm", "¿Desea registrarlo?")
+
+        pagina.callback(dialogo)
+
+        assert dialogo.accepted is True
+
+    def test_parseo_de_folio_nunca_tumba_el_manejador(self, configuracion):
+        """Un dialogo.message inesperado (None) no debe propagar una
+        excepción fuera del callback de Playwright."""
+        pagina, estado = self._instalar_manejador(configuracion, headless=False)
+        dialogo = _DialogoFalso("alert", message=None)  # type: ignore[arg-type]
+
+        pagina.callback(dialogo)  # no debe lanzar
+
+        assert dialogo.accepted is True
+        assert estado["folio"] is None

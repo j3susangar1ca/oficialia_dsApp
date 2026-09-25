@@ -957,7 +957,32 @@ class RpaIntranet:
                 raise ErrorRpa("FORMULARIO_WEBIX_TIMEOUT", f"No se pudo enviar el formulario: {exc}") from exc
 
     def _registrar_manejador_dialogos(self, pagina) -> dict[str, Any]:
-        """Captura el folio del alert() nativo y lo acepta siempre."""
+        """
+        Captura el folio del alert() nativo (siempre lo acepta, para no
+        bloquear el flujo) y, ante un confirm() nativo ("¿Desea
+        registrarlo?" al enviar el formulario), decide según RPA_HEADLESS:
+
+          - headless=true (sin operador presente, automatización
+            desatendida): lo acepta de inmediato, como antes — nadie va a
+            decidir por él.
+          - headless=false (navegador VISIBLE, el caso de esta
+            instalación): NO LO TOCA. Antes este manejador aceptaba TODO
+            diálogo nativo al instante, sin importar el tipo — ganándole
+            la carrera al operador que quería revisar los datos del
+            formulario Webix antes de decidir, quien entonces cerraba el
+            diálogo a mano (creyendo que aún no se había resuelto) y
+            terminaba registrando el oficio con un segundo clic manual
+            fuera de este flujo. Al dejar el confirm() sin tocar, es el
+            propio navegador —controlado por Playwright pero VISIBLE en
+            pantalla— el que lo mantiene abierto hasta que el operador
+            haga clic en Sí/No con calma; _extraer_folio_confirmacion ya
+            está preparado para esperar varios minutos ese desenlace.
+
+        En ambos modos, un alert() (la confirmación con folio tras
+        aceptar el registro) siempre se acepta de inmediato: nunca es la
+        pregunta que requiere criterio humano, solo informa un resultado
+        ya decidido.
+        """
         estado: dict[str, Any] = {"folio": None, "manejador": None}
 
         def manejador(dialogo) -> None:
@@ -965,11 +990,22 @@ class RpaIntranet:
                 folio = self._parsear_folio(dialogo.message)
                 if folio:
                     estado["folio"] = folio
-            finally:
-                try:
-                    dialogo.accept()
-                except Exception:  # noqa: BLE001
-                    pass
+            except Exception:  # noqa: BLE001 — el parseo nunca debe tumbar el manejador
+                logger.debug("No se pudo interpretar el mensaje del diálogo nativo", exc_info=True)
+
+            tipo = getattr(dialogo, "type", "") or ""
+            if tipo == "confirm" and not self.config.rpa_headless:
+                logger.info(
+                    "[RPA] Diálogo de confirmación abierto en la ventana visible "
+                    "(%r) — esperando la decisión del operador, sin aceptarlo por código.",
+                    dialogo.message,
+                )
+                return
+
+            try:
+                dialogo.accept()
+            except Exception:  # noqa: BLE001
+                pass
 
         estado["manejador"] = manejador
         pagina.on("dialog", manejador)

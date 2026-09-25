@@ -405,6 +405,10 @@ class AccionAuditoria(str, Enum):
     DESCARTAR = "DESCARTAR"
     REINTENTAR_RPA = "REINTENTAR_RPA"
     CONFIRMAR_LOTE = "CONFIRMAR_LOTE"
+    #: El revisor certifica a mano que la Intranet SÍ registró el oficio
+    #: (folio visible en pantalla) aunque el RPA no lo haya detectado
+    #: automáticamente — ver FlujoDocumental.confirmar_registro_manual.
+    CONFIRMAR_REGISTRO_MANUAL = "CONFIRMAR_REGISTRO_MANUAL"
 
 
 class RegistroAuditoria(BaseModel):

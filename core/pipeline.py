@@ -21,6 +21,14 @@ Garantías operativas heredadas:
     - RPA y Google Sheets se ejecutan en segundo plano y NUNCA bloquean
       la confirmación; un fallo de Sheets no revierte el COMPLETADO.
     - 'Reintentar RPA' reinyecta el documento en ERROR_RPA sin reextraer.
+    - 'Confirmar registro manual' (confirmar_registro_manual): la Intranet
+      a veces exige que el operador valide/confirme a mano en la ventana
+      del navegador (ver rpa/playwright_rpa.py), y esa validación puede
+      resolverse sin que el detector automático de folio la capture a
+      tiempo — el documento queda en ERROR_RPA aunque SÍ haya quedado
+      registrado. Esta acción certifica el folio real a mano (auditable)
+      en vez de obligar a un 'Reintentar RPA' que arriesgaría un duplicado
+      en la Intranet.
 
 Preprocesamiento heurístico ANTES de la IA (`core.heuristic_extractor.
 extraer_pistas`): sobre la capa de texto embebida del PDF (instantánea,
@@ -523,6 +531,75 @@ class FlujoDocumental:
         )
         self.repo.registrar_auditoria(doc_id, revisor, AccionAuditoria.REINTENTAR_RPA, {})
         self.ejecutor_salida.submit(self._ejecutar_salida, doc_id)
+        return documento
+
+    def confirmar_registro_manual(self, doc_id: str, folio_acuse: str, revisor: str) -> DocumentoRegistro:
+        """
+        Certifica a mano que la Intranet SÍ registró el oficio (el revisor
+        vio el folio en pantalla) cuando el documento quedó en ERROR_RPA
+        pese a eso — típicamente porque la confirmación "¿Desea
+        registrarlo?" de la Intranet exige validación manual del operador
+        (ver rpa/playwright_rpa.py::_registrar_manejador_dialogos) y esa
+        validación se resolvió sin que el detector automático de folio
+        (_extraer_folio_confirmacion) llegara a leerlo a tiempo.
+
+        Pasa el documento DIRECTO a COMPLETADO con el folio capturado a
+        mano (sin volver a abrir el navegador ni tocar la Intranet) —
+        deliberadamente distinto de 'Reintentar RPA', que SÍ reinyecta el
+        formulario y arriesgaría un registro duplicado si el primer
+        intento ya se completó del lado de la Intranet. Queda auditado
+        (AccionAuditoria.CONFIRMAR_REGISTRO_MANUAL) y sincronizado a
+        Google Sheets igual que un COMPLETADO por RPA normal — un fallo de
+        Sheets aquí tampoco revierte el COMPLETADO (misma garantía que
+        _ejecutar_salida).
+        """
+        documento = self.repo.obtener(doc_id)
+        if documento is None:
+            raise ValueError(f"Documento no encontrado: {doc_id}")
+        if documento.estado != EstadoDocumento.ERROR_RPA:
+            raise ValueError(f"El documento no está en ERROR_RPA (estado actual: {documento.estado.value})")
+
+        folio_acuse = folio_acuse.strip()
+        if not folio_acuse:
+            raise ValueError("El folio institucional es obligatorio para confirmar el registro a mano")
+
+        resultado = ResultadoRpa(
+            id_ejecucion=str(uuid.uuid4()),
+            folio_acuse=folio_acuse,
+            fecha_ejecucion=datetime.now().isoformat(timespec="milliseconds"),
+            duracion_ms=0,
+            captura_acuse_path=None,
+            intentos=documento.rpa.intentos if documento.rpa else 1,
+            mensaje_error=(
+                f"Registro certificado a mano por {revisor}: el detector automático de folio no lo "
+                "capturó a tiempo, pero el operador confirmó en pantalla que la Intranet SÍ registró "
+                "el oficio con este folio."
+            ),
+            exitoso=True,
+            simulado=False,
+        )
+        documento = self.repo.guardar_resultado_rpa(
+            doc_id, resultado, EstadoDocumento.COMPLETADO, version_esperada=documento.version
+        )
+        self.repo.registrar_auditoria(
+            doc_id, revisor, AccionAuditoria.CONFIRMAR_REGISTRO_MANUAL,
+            {"folio_acuse": {"anterior": None, "nuevo": folio_acuse}},
+        )
+        logger.info("Documento %s COMPLETADO por confirmación manual (acuse %s, revisor %s)", doc_id, folio_acuse, revisor)
+
+        # Google Sheets: mismo fallo controlado que _ejecutar_salida — nunca
+        # revierte el COMPLETADO que ya quedó persistido arriba.
+        try:
+            estado_sheets = self.sheets.registrar_documento(documento, resultado)
+        except Exception as exc:  # noqa: BLE001
+            estado_sheets = EstadoSheets(sincronizado=False, error=f"Fallo al tabular en Google Sheets: {exc}")
+        try:
+            documento = self.repo.guardar_sheets(
+                doc_id, estado_sheets, version_esperada=self.repo.obtener(doc_id).version  # type: ignore[union-attr]
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("No se pudo persistir el estado Sheets de %s", doc_id)
+
         return documento
 
     def _ejecutar_salida(self, doc_id: str) -> None:

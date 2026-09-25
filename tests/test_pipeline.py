@@ -7,11 +7,14 @@ cuando la IA falla.
 
 from __future__ import annotations
 
+import uuid
+
 import pymupdf
 import pytest
 
 from core.ai_extractor import ErrorExtraccionIA
 from core.models import (
+    AccionAuditoria,
     DocumentoRegistro,
     EstadoDocumento,
     EstadoRespuesta,
@@ -206,6 +209,87 @@ class TestVerificarDuplicado:
         pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
         pipeline.verificar_duplicado(_pdf_con_oficio())
         assert pipeline.repo.listar() == []
+
+
+class TestConfirmarRegistroManual:
+    """FlujoDocumental.confirmar_registro_manual — certifica a mano un
+    ERROR_RPA cuando el operador vio en la ventana visible de la Intranet
+    que el oficio SÍ quedó registrado (ver rpa/playwright_rpa.py::
+    _registrar_manejador_dialogos), pero el detector automático de folio
+    no llegó a capturarlo a tiempo. Distinto de 'Reintentar RPA': no vuelve
+    a abrir el navegador ni reenvía el formulario (evita un duplicado)."""
+
+    def _documento_error_rpa(self, repositorio) -> DocumentoRegistro:
+        metadatos = MetadatosOficio(
+            numero_oficio="DSA-2026-777-OF",
+            fecha_emision="2026-08-15",
+            procedencia=Procedencia.AJENA,
+            dependencia_area="NO ESPECIFICADO",
+            remitente_nombre="ALGUIEN",
+            destinatario_nombre="ALGUIEN MAS",
+            asunto="Asunto de prueba con longitud suficiente para el contrato.",
+        )
+        return repositorio.crear(DocumentoRegistro(
+            id=str(uuid.uuid4()),
+            nombre_archivo_original="oficio.pdf",
+            ruta_archivo_actual="03_procesados/oficio.pdf",
+            origen=OrigenIngesta.WEB_DRAG_DROP,
+            estado=EstadoDocumento.ERROR_RPA,
+            sha256=uuid.uuid4().hex + uuid.uuid4().hex,
+            metadatos_validados=metadatos,
+            error_msg="FOLIO_CONFIRMACION_NO_ENCONTRADO :: tiempo de espera agotado",
+        ))
+
+    def test_certifica_folio_y_pasa_a_completado(self, flujo, repositorio):
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
+        documento = self._documento_error_rpa(repositorio)
+
+        actualizado = pipeline.confirmar_registro_manual(documento.id, "HCG-OP-2026-009821", "ana")
+
+        assert actualizado.estado == EstadoDocumento.COMPLETADO
+        assert actualizado.rpa is not None
+        assert actualizado.rpa.folio_acuse == "HCG-OP-2026-009821"
+        assert actualizado.rpa.exitoso is True
+        assert actualizado.rpa.simulado is False
+        # El error_msg de la columna se limpia: exitoso=True (ver guardar_resultado_rpa).
+        assert repositorio.obtener(documento.id).estado == EstadoDocumento.COMPLETADO
+
+    def test_recorta_espacios_del_folio(self, flujo, repositorio):
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
+        documento = self._documento_error_rpa(repositorio)
+        actualizado = pipeline.confirmar_registro_manual(documento.id, "  HCG-OP-2026-009821  ", "ana")
+        assert actualizado.rpa.folio_acuse == "HCG-OP-2026-009821"
+
+    def test_folio_vacio_es_invalido(self, flujo, repositorio):
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
+        documento = self._documento_error_rpa(repositorio)
+        with pytest.raises(ValueError):
+            pipeline.confirmar_registro_manual(documento.id, "   ", "ana")
+        # No debe haber mutado el documento ante folio inválido.
+        assert repositorio.obtener(documento.id).estado == EstadoDocumento.ERROR_RPA
+
+    def test_documento_inexistente_es_invalido(self, flujo):
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
+        with pytest.raises(ValueError):
+            pipeline.confirmar_registro_manual("no-existe", "HCG-OP-2026-1", "ana")
+
+    def test_solo_aplica_sobre_documentos_en_error_rpa(self, flujo, repositorio):
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
+        documento = self._documento_error_rpa(repositorio)
+        pipeline.confirmar_registro_manual(documento.id, "HCG-OP-2026-1", "ana")  # -> COMPLETADO
+
+        with pytest.raises(ValueError):
+            pipeline.confirmar_registro_manual(documento.id, "HCG-OP-2026-2", "ana")
+
+    def test_queda_registrado_en_la_auditoria(self, flujo, repositorio):
+        pipeline = flujo(_ExtractorFalso("AI_NO_CONFIGURADA"))
+        documento = self._documento_error_rpa(repositorio)
+        pipeline.confirmar_registro_manual(documento.id, "HCG-OP-2026-1", "ana")
+
+        historial = repositorio.listar_auditoria(documento.id)
+        assert historial[0].accion == AccionAuditoria.CONFIRMAR_REGISTRO_MANUAL
+        assert historial[0].revisor_usuario_id == "ana"
+        assert historial[0].campos_modificados["folio_acuse"]["nuevo"] == "HCG-OP-2026-1"
 
 
 class _RedactorFalso:
