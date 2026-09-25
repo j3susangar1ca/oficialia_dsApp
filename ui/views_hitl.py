@@ -69,6 +69,7 @@ from ui.layout import (
     estilo_badge,
     obtener_config,
     obtener_pipeline,
+    stepper_pipeline,
     tiempo_relativo,
 )
 
@@ -76,6 +77,13 @@ logger = logging.getLogger("oficialia.ui.hitl")
 
 #: Estados en los que el formulario es editable y se puede confirmar.
 ESTADOS_EDITABLES = {EstadoDocumento.PENDIENTE_REVISION}
+
+#: Estados en los que un worker de fondo sigue trabajando en el documento
+#: y todavía no hay nada útil que mostrar en el visor/formulario (el PDF
+#: puede seguir moviéndose de carpeta, metadatos_extraidos sigue en None):
+#: `pagina_revision` dibuja `_panel_procesando` en vez del split-screen
+#: mientras el estado esté en este conjunto.
+_ESTADOS_EN_PROCESAMIENTO = {EstadoDocumento.EN_PREPROCESO, EstadoDocumento.EXTRAYENDO}
 
 
 # ----------------------------------------------------------------------
@@ -229,21 +237,38 @@ def pagina_revision(doc_id: str) -> None:
                         if documento.origen.value == "SCANNER_ADF":
                             ui.label("· escáner").classes("text-[11px] text-slate-400")
 
-        # El PDF recibe más espacio, mientras el panel lateral conserva un
-        # ancho cómodo para validar sin desplazamiento horizontal.
-        with ui.splitter(value=58).classes(
-            "w-full flex-1 min-h-0 rounded-xl border border-slate-200 overflow-hidden"
-        ).props("limits=38,68") as split:
-            # ==== PANEL IZQUIERDO: visor de PDF ====
-            with split.before:
-                _panel_visor(documento)
+        # ---------------- Stepper: "¿en qué parte del proceso va esto?" ----------------
+        with ui.row().classes(
+            "w-full items-center bg-white rounded-xl border border-slate-200 q-pa-sm no-wrap"
+        ).style("overflow-x:auto"):
+            stepper_pipeline(documento.estado)
 
-            # ==== PANEL DERECHO: formulario + acciones ====
-            with split.after:
-                acciones = _panel_formulario(
-                    documento, borrador, revisor, estado_visto, pipeline, config,
-                    bloqueo, nombre_revisor_bloqueo,
-                )
+        # ESTADOS_EN_PROCESAMIENTO (abajo): todavía no hay nada útil que
+        # mostrar en el visor/formulario (el PDF puede seguir moviéndose de
+        # carpeta y metadatos_extraidos sigue en None) — antes esta pantalla
+        # dibujaba igual el split-screen con un formulario casi vacío, sin
+        # ninguna señal de que el sistema seguía trabajando solo. Se
+        # sustituye por un panel de progreso a pantalla completa; en cuanto
+        # el estado cambie (ver el auto-refresco más abajo), la recarga
+        # entra por la rama normal del split-screen de una vez.
+        if documento.estado in _ESTADOS_EN_PROCESAMIENTO:
+            _panel_procesando(documento)
+        else:
+            # El PDF recibe más espacio, mientras el panel lateral conserva
+            # un ancho cómodo para validar sin desplazamiento horizontal.
+            with ui.splitter(value=58).classes(
+                "w-full flex-1 min-h-0 rounded-xl border border-slate-200 overflow-hidden"
+            ).props("limits=38,68") as split:
+                # ==== PANEL IZQUIERDO: visor de PDF ====
+                with split.before:
+                    _panel_visor(documento)
+
+                # ==== PANEL DERECHO: formulario + acciones ====
+                with split.after:
+                    acciones = _panel_formulario(
+                        documento, borrador, revisor, estado_visto, pipeline, config,
+                        bloqueo, nombre_revisor_bloqueo,
+                    )
 
     async def _atajo_revision(evento) -> None:
         """Acciones rápidas, ignoradas automáticamente cuando se edita un campo."""
@@ -263,9 +288,62 @@ def pagina_revision(doc_id: str) -> None:
     # Registrar" (detectado al verificar esta pantalla en navegador).
     ui.keyboard(_atajo_revision, repeating=False)
 
-    # Auto-refresco mientras el RPA corre en segundo plano.
-    if documento.estado == EstadoDocumento.EJECUTANDO_RPA:
+    # Auto-refresco mientras un worker de fondo sigue trabajando en el
+    # documento (preproceso, extracción o RPA) — apenas cambie el estado,
+    # la recarga entra ya por la rama correcta (split-screen normal o el
+    # siguiente banner), sin que el revisor tenga que refrescar a mano.
+    if documento.estado in _ESTADOS_EN_PROCESAMIENTO or documento.estado == EstadoDocumento.EJECUTANDO_RPA:
         ui.timer(2.0, lambda: _vigilar_cambio_estado(doc_id, estado_visto))
+
+
+# ----------------------------------------------------------------------
+# Panel de progreso — mientras el preproceso/extracción corren en fondo
+# ----------------------------------------------------------------------
+#: (ícono, título, subtítulo) por sub-fase de `_ESTADOS_EN_PROCESAMIENTO`.
+_COPIA_PROCESANDO: dict[EstadoDocumento, tuple[str, str, str]] = {
+    EstadoDocumento.EN_PREPROCESO: (
+        "auto_fix_high",
+        "Preparando el documento…",
+        "Verificando el PDF, contando páginas y generando las imágenes que se usarán para leerlo. "
+        "Esto toma solo unos segundos.",
+    ),
+    EstadoDocumento.EXTRAYENDO: (
+        "manage_search",
+        "Extrayendo los datos del oficio…",
+        "Leyendo el documento para completar folio, fechas, remitente, destinatario y asunto "
+        "automáticamente. El formulario aparecerá listo para revisar en cuanto termine — "
+        "normalmente toma entre 10 y 30 segundos.",
+    ),
+}
+
+
+def _panel_procesando(documento: DocumentoRegistro) -> None:
+    """
+    Pantalla de espera mientras EN_PREPROCESO/EXTRAYENDO corren en un hilo
+    de fondo (ver core.pipeline.FlujoDocumental.ingestar_y_procesar): antes
+    de esto, navegar aquí a media extracción dibujaba igual el split-screen
+    con un formulario casi vacío, sin ninguna señal de que el sistema
+    seguía trabajando solo. `pagina_revision` ya programa el auto-refresco
+    (ver `_vigilar_cambio_estado`, más abajo) — esta pantalla solo necesita
+    comunicar "sigo vivo, ya casi" mientras tanto.
+    """
+    icono, titulo, subtitulo = _COPIA_PROCESANDO.get(documento.estado, ("hourglass_top", "Procesando…", ""))
+    with ui.column().classes(
+        "w-full flex-1 min-h-0 items-center justify-center gap-4 rounded-xl border "
+        "border-slate-200 bg-white"
+    ):
+        with ui.element("div").classes("oficialia-paso-circulo oficialia-paso-actual").style(
+            "width:64px;height:64px;border-color:#38bdf8;background:#f0f9ff;color:#0284c7"
+        ):
+            ui.icon(icono, size="30px")
+        with ui.column().classes("items-center gap-1 text-center q-px-md"):
+            ui.label(titulo).classes("text-base font-semibold text-slate-800")
+            ui.label(subtitulo).classes("text-xs text-slate-500").style("max-width:420px")
+        ui.linear_progress(show_value=False).props("indeterminate rounded color=info").classes("w-64")
+        ui.label(f"Iniciado {tiempo_relativo(documento.fecha_ingesta)}").classes("text-[11px] text-slate-400")
+        ui.button("Volver a la bandeja", icon="arrow_back").props("flat no-caps color=grey").on_click(
+            lambda: ui.navigate.to("/")
+        )
 
 
 # ----------------------------------------------------------------------

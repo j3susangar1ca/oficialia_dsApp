@@ -53,7 +53,7 @@ from datetime import datetime
 
 from nicegui import app, run, ui
 
-from core.models import GRUPOS_BANDEJA, MetodoExtraccion, OrigenIngesta, meta_estado
+from core.models import GRUPOS_BANDEJA, EstadoDocumento, MetodoExtraccion, OrigenIngesta, meta_estado
 from ui.layout import (
     REVISOR_POR_DEFECTO,
     aplicar_tema,
@@ -143,6 +143,13 @@ def _fila_de_tabla(documento) -> dict:
         # aparte): evita la ambigüedad de dos etiquetas de color casi
         # idéntico ("Por revisar" / "Requiere revisión") sin relación clara.
         "estado_calificador": "Revisión manual campo por campo" if es_heuristico else "",
+        # Ambos consumidos por el slot "body-cell-estado" (ver más abajo):
+        # una barra de progreso animada mientras un worker de fondo sigue
+        # trabajando (ver core.models.MetaEstado.en_progreso), o una
+        # insignia "!" flotante cuando el documento necesita atención —
+        # mismo lenguaje visual que el stepper de ui.views_hitl.
+        "en_progreso": info.en_progreso,
+        "requiere_atencion": documento.estado == EstadoDocumento.ERROR_RPA,
         "paginas": documento.preproceso.num_paginas if documento.preproceso else None,
         "ingreso": tiempo_relativo(documento.fecha_ingesta),
         "ingreso_abs": tiempo_absoluto(documento.fecha_ingesta),
@@ -335,8 +342,22 @@ def pagina_bandeja() -> None:
             "body-cell-estado",
             '<q-td key="estado" :props="props">'
             '<div class="flex flex-col gap-0.5 py-1">'
+            # position:relative envuelve el badge para anclar la insignia
+            # "!" flotante (ERROR_RPA) en su esquina — mismo lenguaje
+            # visual que el nodo de alerta del stepper de ui.layout.
+            '<span style="position:relative;width:fit-content;">'
             '<span class="rounded-full px-2.5 py-0.5 text-[11px] font-medium w-fit" '
             ':style="props.row.estado_style">{{ props.row.estado }}</span>'
+            '<span v-if="props.row.requiere_atencion" class="oficialia-exclamacion" '
+            'aria-hidden="true">!</span>'
+            "</span>"
+            # Barra fina animada mientras un worker de fondo sigue
+            # trabajando en el documento (EN_PREPROCESO/EXTRAYENDO/
+            # EJECUTANDO_RPA — ver core.models.MetaEstado.en_progreso):
+            # la misma señal "esto sigue solo" que el panel de progreso de
+            # ui.views_hitl, visible ya desde la bandeja sin abrir el oficio.
+            '<div v-if="props.row.en_progreso" class="oficialia-barra-progreso" '
+            'style="max-width:120px;"></div>'
             '<span v-if="props.row.estado_calificador" '
             'class="text-[10px] font-medium text-orange-700 flex items-center gap-1">'
             '<span aria-hidden="true">⚠</span>{{ props.row.estado_calificador }}</span>'
