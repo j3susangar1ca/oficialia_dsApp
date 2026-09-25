@@ -121,7 +121,7 @@ COLORES_BADGE = {
 #: Etiqueta legible del método de extracción, solo para la exportación CSV
 #: (en la tabla se resume como calificador del badge de estado, ver abajo).
 _METODO_ETIQUETA_CSV = {
-    MetodoExtraccion.IA.value: "Automático (IA)",
+    MetodoExtraccion.IA.value: "Automático",
     MetodoExtraccion.HEURISTICA_FALLBACK.value: "Heurística — revisión manual",
     MetodoExtraccion.HITL.value: "Manual",
 }

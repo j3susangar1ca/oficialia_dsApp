@@ -67,6 +67,41 @@ class TestFechaEmision:
         assert m.fecha_emision == "2026-02-28"
 
 
+class TestFechaRecepcion:
+    """A diferencia de fecha_emision, es OPCIONAL: el sello de recibido no
+    siempre está presente o legible (ver core.ai_extractor, sección 2.9.e
+    del prompt institucional, y rpa.playwright_rpa._rellenar_formulario_
+    webix, que cae a la fecha/hora del registro en la Intranet cuando
+    este campo viene en None)."""
+
+    def test_ausente_por_defecto(self):
+        m = _metadatos()
+        assert m.fecha_recepcion is None
+
+    def test_cadena_vacia_se_interpreta_como_none(self):
+        m = _metadatos(fecha_recepcion="")
+        assert m.fecha_recepcion is None
+
+    def test_none_explicito_se_preserva(self):
+        m = _metadatos(fecha_recepcion=None)
+        assert m.fecha_recepcion is None
+
+    def test_fecha_iso_valida_pasa(self):
+        m = _metadatos(fecha_recepcion="2026-08-16")
+        assert m.fecha_recepcion == "2026-08-16"
+
+    @pytest.mark.parametrize("valor", ["2026-13-01", "15/08/2026", "2026-2-30", "no-es-fecha"])
+    def test_formatos_invalidos_se_rechazan(self, valor):
+        with pytest.raises(ValidationError):
+            _metadatos(fecha_recepcion=valor)
+
+    def test_puede_diferir_de_fecha_emision(self):
+        """Caso normal: el oficio se emite un día y se recibe otro."""
+        m = _metadatos(fecha_emision="2026-08-15", fecha_recepcion="2026-08-18")
+        assert m.fecha_emision == "2026-08-15"
+        assert m.fecha_recepcion == "2026-08-18"
+
+
 class TestNormalizacionMayusculas:
     def test_dependencia_remitente_destinatario_a_mayusculas(self):
         m = _metadatos()
@@ -115,6 +150,17 @@ class TestUbicacionesCampos:
         )
         assert ubicaciones.numero_oficio is not None
         assert ubicaciones.fecha_emision is None
+        assert ubicaciones.fecha_recepcion is None
+
+    def test_fecha_recepcion_admite_su_propia_ubicacion(self):
+        """El sello de recibido está en una zona de la página distinta de
+        la fecha de emisión — cada campo resalta su propio rectángulo."""
+        ubicaciones = UbicacionesCampos(
+            fecha_emision=CampoUbicacion(pagina=1, x0=0.6, y0=0.05, x1=0.9, y1=0.1),
+            fecha_recepcion=CampoUbicacion(pagina=1, x0=0.05, y0=0.8, x1=0.3, y1=0.9),
+        )
+        assert ubicaciones.fecha_emision.x0 == 0.6
+        assert ubicaciones.fecha_recepcion.x0 == 0.05
 
     @pytest.mark.parametrize("campo", ["x0", "y0", "x1", "y1"])
     def test_coordenadas_fuera_de_0_1_son_invalidas(self, campo):
