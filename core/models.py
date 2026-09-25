@@ -10,6 +10,10 @@ normalización heredadas del esquema Zod:
     - numero_oficio: trim, obligatorio, caracteres reservados de
       sistema de archivos ( / \\ : * ? " < > | ) sustituidos por '-'.
     - fecha_emision: patrón YYYY-MM-DD y fecha calendario real válida.
+    - fecha_recepcion: igual patrón YYYY-MM-DD, pero OPCIONAL (null) — la
+      fecha del sello de recibido de la Oficialía de Partes, distinta de
+      fecha_emision; null cuando el documento no trae sello o su fecha es
+      ilegible.
     - procedencia: enum cerrado 'HCG' | 'Ajena'.
     - Textos de personas/áreas: trim + MAYÚSCULAS.
     - cargos: default 'NO ESPECIFICADO' si vienen vacíos.
@@ -135,8 +139,11 @@ ESTADOS_PENDIENTES: frozenset[EstadoDocumento] = frozenset({EstadoDocumento.PEND
 class MetadatosOficio(BaseModel):
     """
     Metadatos estructurados extraídos del oficio (contrato de la IA y del
-    formulario de revisión asistida). Los 11 campos son obligatorios en la
-    salida; los validadores aplican la normalización de dominio original.
+    formulario de revisión asistida). De los 12 campos, 11 son obligatorios
+    en la salida (valores de contingencia si no hay evidencia); fecha_
+    recepcion es el único genuinamente opcional (null): depende de que el
+    documento traiga un sello de recibido legible, cosa que no siempre
+    ocurre. Los validadores aplican la normalización de dominio original.
     """
 
     model_config = ConfigDict(str_strip_whitespace=False)  # el trim se hace explícito
@@ -148,6 +155,14 @@ class MetadatosOficio(BaseModel):
     )
     #: Fecha de emisión en formato ISO 8601 calendario.
     fecha_emision: str = Field(..., description="Fecha de emisión (YYYY-MM-DD)")
+    #: Fecha de RECEPCIÓN asentada en el sello de la Oficialía de Partes —
+    #: distinta de fecha_emision (la del emisor). `None` si el documento no
+    #: trae sello de recibido o su fecha resulta ilegible; nunca se infiere
+    #: a partir de otro dato (ver core.ai_extractor, sección 2.9.e del prompt).
+    fecha_recepcion: Optional[str] = Field(
+        default=None,
+        description="Fecha de recepción según el sello de la Oficialía (YYYY-MM-DD) o null",
+    )
     #: Origen institucional del documento.
     procedencia: Procedencia = Field(..., description="'HCG' o 'Ajena'")
     #: Dependencia, departamento o secretaría emisora (MAYÚSCULAS).
@@ -193,6 +208,26 @@ class MetadatosOficio(BaseModel):
             date.fromisoformat(valor)
         except ValueError as exc:
             raise ValueError("La fecha de emisión no es una fecha calendario válida") from exc
+        return valor
+
+    @field_validator("fecha_recepcion", mode="before")
+    @classmethod
+    def _validar_fecha_recepcion(cls, valor: Any) -> Optional[str]:
+        """Misma normalización que `_validar_fecha`, pero opcional: '' y
+        None significan 'sin sello legible' (ver `_plazo_vacio_none`, mismo
+        patrón para un campo opcional que puede llegar vacío desde el
+        formulario HITL o el JSON de la IA)."""
+        if valor is None:
+            return None
+        valor = valor.strip() if isinstance(valor, str) else valor
+        if not valor:
+            return None
+        if not PATRON_FECHA_ISO.match(valor):
+            raise ValueError("Formato de fecha requerido: YYYY-MM-DD (o vacío/null si no hay sello legible)")
+        try:
+            date.fromisoformat(valor)
+        except ValueError as exc:
+            raise ValueError("La fecha de recepción no es una fecha calendario válida") from exc
         return valor
 
     @field_validator("dependencia_area", "remitente_nombre", "destinatario_nombre")
@@ -266,6 +301,7 @@ class UbicacionesCampos(BaseModel):
 
     numero_oficio: Optional[CampoUbicacion] = None
     fecha_emision: Optional[CampoUbicacion] = None
+    fecha_recepcion: Optional[CampoUbicacion] = None
     dependencia_area: Optional[CampoUbicacion] = None
     remitente_nombre: Optional[CampoUbicacion] = None
     remitente_cargo: Optional[CampoUbicacion] = None

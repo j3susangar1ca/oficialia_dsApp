@@ -673,7 +673,13 @@ class RpaIntranet:
         self._asignar_webix(marco, "fech_ofic", _formatear_fecha(self._parsear_fecha(metadatos.fecha_emision)))
         self._asignar_webix(marco, "info_sens", "1" if metadatos.contiene_datos_sensibles else "0")
         self._asignar_webix(marco, "tipo_info", "0")
-        self._asignar_webix(marco, "fech_rece", _formatear_fecha(ahora))
+        # fech_rece: fecha del sello de recibido (metadatos.fecha_recepcion) si
+        # la extracción pudo leerlo; si el sello no era legible o el documento
+        # no lo trae (campo opcional, ver core.models.MetadatosOficio), se cae
+        # al comportamiento anterior — la fecha/hora de ESTE registro en la
+        # Intranet — en vez de dejar el campo obligatorio del formulario vacío.
+        fecha_recepcion = self._parsear_fecha(metadatos.fecha_recepcion) if metadatos.fecha_recepcion else ahora
+        self._asignar_webix(marco, "fech_rece", _formatear_fecha(fecha_recepcion))
         self._asignar_webix(marco, "hora_rece", _formatear_hora(ahora))
         self._asignar_webix(marco, "nume_ofic", metadatos.numero_oficio)
 

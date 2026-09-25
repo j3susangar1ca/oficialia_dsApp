@@ -94,6 +94,25 @@ def _validar_fecha(valor: str) -> Optional[str]:
     return None
 
 
+def _validar_fecha_recepcion(valor: str) -> Optional[str]:
+    """Igual que `_validar_fecha`, pero tolerante a vacío: fecha_recepcion
+    es opcional (sello ausente o ilegible, ver core.models.MetadatosOficio)."""
+    from datetime import date
+
+    from core.models import PATRON_FECHA_ISO
+
+    valor = valor.strip()
+    if not valor:
+        return None
+    if not PATRON_FECHA_ISO.match(valor):
+        return "Formato requerido: YYYY-MM-DD (o vacío si no hay sello legible)"
+    try:
+        date.fromisoformat(valor)
+    except ValueError:
+        return "Fecha calendario inválida"
+    return None
+
+
 def _validar_obligatorio(valor: str) -> Optional[str]:
     if not valor.strip():
         return "Campo obligatorio"
@@ -432,10 +451,10 @@ def _panel_formulario(
         """
         Crea un campo precargado con el valor ya presente en `borrador`
         (`_precargar_borrador`, con los nombres de columna del esquema v2:
-        numero_oficio, fecha_emision, dependencia_area, remitente_nombre,
-        remitente_cargo, destinatario_nombre, destinatario_cargo, asunto,
-        plazo_dias) y enlazado para que las ediciones del revisor se
-        reflejen de vuelta en `borrador`.
+        numero_oficio, fecha_emision, fecha_recepcion, dependencia_area,
+        remitente_nombre, remitente_cargo, destinatario_nombre,
+        destinatario_cargo, asunto, plazo_dias) y enlazado para que las
+        ediciones del revisor se reflejen de vuelta en `borrador`.
 
         OJO: `bind_value_to` es una sincronización de UNA sola vía
         (widget → borrador) que se dispara de inmediato al enlazar (no
@@ -488,6 +507,12 @@ def _panel_formulario(
 
             _campo("numero_oficio", "Número de Oficio / Folio", placeholder="DSA-2026-089-OF o S/N", validador=_validar_folio)
             _campo("fecha_emision", "Fecha de Emisión (YYYY-MM-DD)", placeholder="2026-09-01", validador=_validar_fecha)
+            _campo(
+                "fecha_recepcion",
+                "Fecha de Recepción — sello (YYYY-MM-DD)",
+                placeholder="2026-09-02 (vacío si no hay sello legible)",
+                validador=_validar_fecha_recepcion,
+            )
 
             with ui.row().classes("w-full items-center gap-4 no-wrap"):
                 ui.label("Procedencia").classes("text-xs font-medium text-slate-600")
@@ -711,7 +736,7 @@ def _panel_respuesta_ia(documento: DocumentoRegistro, revisor: dict, pipeline, c
     if oficio_origen is None:
         return
 
-    with ui.expansion("Asistente de Respuesta con IA", icon="smart_toy").classes("w-full").props("dense"):
+    with ui.expansion("Generar Respuesta al Oficio", icon="description").classes("w-full").props("dense"):
         with ui.column().classes("w-full gap-3 q-pa-sm"):
             ui.label(
                 "Genera un borrador de contestación institucional; usted lo revisa, edita y "
@@ -728,7 +753,7 @@ def _panel_respuesta_ia(documento: DocumentoRegistro, revisor: dict, pipeline, c
 
 
 def _formulario_generacion(documento: DocumentoRegistro, revisor: dict, pipeline) -> None:
-    """Directrices del funcionario + botón [Generar Borrador con IA]."""
+    """Directrices del funcionario + botón [Generar Borrador]."""
     peticion_estado: dict[str, str] = {
         "sentido": SentidoRespuesta.ATENCION_FAVORABLE.value,
         "fundamento_legal": "",
@@ -775,7 +800,7 @@ def _formulario_generacion(documento: DocumentoRegistro, revisor: dict, pipeline
             ui.notify(f"Revise los campos: {exc}", type="negative", position="top")
             return
 
-        ui.notify("Generando borrador con IA…", type="info", position="top")
+        ui.notify("Generando borrador…", type="info", position="top")
         try:
             await run.io_bound(pipeline.generar_borrador_respuesta, documento.id, peticion)
         except Exception as exc:  # noqa: BLE001
@@ -785,7 +810,7 @@ def _formulario_generacion(documento: DocumentoRegistro, revisor: dict, pipeline
         ui.notify("Borrador generado.", type="positive", position="top")
         ui.navigate.to(f"/revision/{documento.id}")
 
-    ui.button("Generar Borrador con IA", icon="auto_awesome").props("color=purple-8 no-caps").on_click(_generar)
+    ui.button("Generar Borrador", icon="post_add").props("color=primary no-caps").on_click(_generar)
 
 
 def _tarjeta_borrador_respuesta(
@@ -1097,6 +1122,7 @@ def _precargar_borrador(documento: DocumentoRegistro) -> dict[str, Any]:
         return {
             "numero_oficio": "",
             "fecha_emision": "",
+            "fecha_recepcion": "",
             "procedencia": "Ajena",
             "dependencia_area": "",
             "remitente_nombre": "",
@@ -1110,6 +1136,7 @@ def _precargar_borrador(documento: DocumentoRegistro) -> dict[str, Any]:
     return {
         "numero_oficio": fuente.numero_oficio,
         "fecha_emision": fuente.fecha_emision,
+        "fecha_recepcion": fuente.fecha_recepcion or "",
         "procedencia": fuente.procedencia.value,
         "dependencia_area": fuente.dependencia_area,
         "remitente_nombre": fuente.remitente_nombre,

@@ -83,7 +83,7 @@ Analice todas las páginas adjuntas en su orden natural (la página 1 es la car�
 
 Reglas críticas de discriminación visual:
 a) El numero_oficio corresponde SIEMPRE al folio asignado por el emisor. El folio impreso en el sello de recibido es un número de control interno de la Oficialía de Partes y NUNCA debe reportarse como numero_oficio.
-b) La fecha asentada en el sello de recibido es la fecha de RECEPCIÓN, no la de emisión. Utilícela únicamente como contingencia cuando la fecha de emisión resulte ilegible o inexistente.
+b) La fecha asentada en el sello de recibido es la fecha de RECEPCIÓN: repórtela SIEMPRE en el campo fecha_recepcion (sección 3.3) cuando sea legible, con independencia de si fecha_emision pudo leerse o no. Para fecha_emision, en cambio, esa misma fecha del sello solo se usa como contingencia cuando la fecha de emisión propiamente dicha resulte ilegible o inexistente (véase 3.2 y sección 4, paso 6). Son dos campos distintos que pueden coexistir con valores diferentes.
 c) Para identificar al remitente, prefiera el nombre impreso bajo la rúbrica; la firma manuscrita aislada nunca es fuente suficiente. Los funcionarios listados en "C.c.p." no son ni remitente ni destinatario del oficio.
 d) Ante sellos girados o rotados, tinta desvanecida, fotocopias de baja calidad o fax, escale el esfuerzo de lectura antes de declarar ilegible un campo.
 e) Los anexos y páginas subsecuentes también contienen información extraíble (tablas, expedientes, oficios incrustados): considérelos al evaluar plazo_dias y contiene_datos_sensibles.
@@ -93,19 +93,21 @@ a) numero_oficio: jamás infiera un número de oficio a partir del sello de reci
 b) fecha_emision: no asuma una fecha basándose en el contexto temporal si el documento no la muestra. Ante una fecha ilegible o ausente, utilice la del sello de recepción solo si es claramente legible; en caso contrario, aplique la contingencia de la sección 4 (1 de enero del año de contexto). No complete dígitos o meses parcialmente legibles.
 c) remitente_nombre: el nombre del firmante debe leerse bajo la rúbrica o en el pie de firma. Si la firma es ilegible y no existe nombre impreso, devuelva "ILEGIBLE". No utilice nombres que aparezcan en el membrete, en el destinatario o en el sello de recibido. La rúbrica manuscrita nunca es suficiente por sí sola para extraer un nombre.
 d) Coherencia temporal: si la fecha de emisión resulta ser posterior al año de contexto o anterior al año 2000, es muy probable que se trate de un error de lectura. Revise nuevamente la imagen antes de reportarla; si persiste la duda, aplique la contingencia correspondiente en vez de forzar una fecha dudosa.
+e) fecha_recepcion: jamás la infiera a partir de fecha_emision, de la fecha de ingesta del sistema o de cualquier otro dato del documento. Si el oficio no trae sello de recibido, o el sello está presente pero su fecha es ilegible (tinta desvanecida, sello girado o rotado sin lectura posible), devuelva null — nunca fuerce una fecha dudosa ni copie fecha_emision como sustituto.
 
 [3. REGLAS DE EXTRACCIÓN POR CAMPO]
 3.1. numero_oficio (cadena): transcriba el folio del emisor tal cual aparece (por ejemplo: "SSJ/DEA/2026/089", "HCG-CA-045-2026", "DSA-0123"), eliminando únicamente espacios al inicio y al final. No sustituya barras, guiones ni símbolos. Si el documento carece de folio, devuelva exactamente "S/N". Alerta: los números de control interno del sello de recibido NO son el número de oficio; confundirlos se considera un error grave (véase 2.9.a).
 3.2. fecha_emision (cadena, patrón YYYY-MM-DD): aplique el algoritmo de normalización de la sección 4. Alerta: la fecha del sello de recibido no debe usarse a menos que la fecha de emisión esté completamente ausente o ilegible (véase 2.9.b).
-3.3. procedencia ("HCG" o "Ajena"): aplique el árbol de decisión de la sección 5.
-3.4. dependencia_area (cadena): denominación de la unidad administrativa emisora tal como aparece en el membrete o pie de firma (por ejemplo "DIRECCIÓN DE ADMINISTRACIÓN", "SECRETARÍA DE SALUD JALISCO"), convertida a MAYÚSCULAS, sin abreviar mediante suposiciones.
-3.5. remitente_nombre (cadena): nombre completo del suscriptor que firma el documento, en MAYÚSCULAS. Si la firma resulta enteramente ilegible, transcriba la mejor lectura posible de la rúbrica; como última opción devuelva "ILEGIBLE". Alerta: no complete nombres parciales; si sólo se distingue un apellido y el resto es ilegible, devuelva "ILEGIBLE" en lugar de una conjetura (véase 2.9.c).
-3.6. remitente_cargo (cadena): cargo del suscriptor, en MAYÚSCULAS. Si no aparece, devuelva "NO ESPECIFICADO".
-3.7. destinatario_nombre (cadena): funcionario a quien se dirige el oficio, en MAYÚSCULAS.
-3.8. destinatario_cargo (cadena): cargo del destinatario, en MAYÚSCULAS. Si no aparece, devuelva "NO ESPECIFICADO".
-3.9. asunto (cadena): síntesis ejecutiva conforme a la sección 7.
-3.10. plazo_dias (entero no negativo o null): término de respuesta cuantitativo estipulado en el documento ("dentro de los 10 días", "plazo no mayor a 15 días hábiles", "en un término de 5 días naturales"). Si el documento menciona tanto días hábiles como naturales, registre los HÁBILES; si menciona solo uno de ellos, registre ese valor. Ante expresiones cualitativas ("a la brevedad posible", "cuanto antes") o ausencia de término, devuelva null; nunca 0 y nunca una cadena de texto.
-3.11. contiene_datos_sensibles (booleano): aplique los criterios LGPDPPSO de la sección 6.
+3.3. fecha_recepcion (cadena, patrón YYYY-MM-DD, o null): fecha asentada en el sello de recibido de la Oficialía de Partes (véase 2.7). Repórtela SIEMPRE que el sello sea legible, con independencia de si fecha_emision pudo leerse o no — son dos campos distintos y ambos pueden coexistir. Aplique los mismos pasos 1 a 5 del algoritmo de normalización de la sección 4 para transcribirla. Si el documento no trae sello de recibido, o el sello está presente pero la fecha es ilegible, devuelva null (nunca una fecha de contingencia; véase 2.9.e).
+3.4. procedencia ("HCG" o "Ajena"): aplique el árbol de decisión de la sección 5.
+3.5. dependencia_area (cadena): denominación de la unidad administrativa emisora tal como aparece en el membrete o pie de firma (por ejemplo "DIRECCIÓN DE ADMINISTRACIÓN", "SECRETARÍA DE SALUD JALISCO"), convertida a MAYÚSCULAS, sin abreviar mediante suposiciones.
+3.6. remitente_nombre (cadena): nombre completo del suscriptor que firma el documento, en MAYÚSCULAS. Si la firma resulta enteramente ilegible, transcriba la mejor lectura posible de la rúbrica; como última opción devuelva "ILEGIBLE". Alerta: no complete nombres parciales; si sólo se distingue un apellido y el resto es ilegible, devuelva "ILEGIBLE" en lugar de una conjetura (véase 2.9.c).
+3.7. remitente_cargo (cadena): cargo del suscriptor, en MAYÚSCULAS. Si no aparece, devuelva "NO ESPECIFICADO".
+3.8. destinatario_nombre (cadena): funcionario a quien se dirige el oficio, en MAYÚSCULAS.
+3.9. destinatario_cargo (cadena): cargo del destinatario, en MAYÚSCULAS. Si no aparece, devuelva "NO ESPECIFICADO".
+3.10. asunto (cadena): síntesis ejecutiva conforme a la sección 7.
+3.11. plazo_dias (entero no negativo o null): término de respuesta cuantitativo estipulado en el documento ("dentro de los 10 días", "plazo no mayor a 15 días hábiles", "en un término de 5 días naturales"). Si el documento menciona tanto días hábiles como naturales, registre los HÁBILES; si menciona solo uno de ellos, registre ese valor. Ante expresiones cualitativas ("a la brevedad posible", "cuanto antes") o ausencia de término, devuelva null; nunca 0 y nunca una cadena de texto.
+3.12. contiene_datos_sensibles (booleano): aplique los criterios LGPDPPSO de la sección 6.
 
 [4. ALGORITMO DE NORMALIZACIÓN DE FECHAS A ISO 8601 (YYYY-MM-DD)]
 Paso 1 — Localización: busque la fecha de emisión en expresiones textuales ("Guadalajara, Jalisco, a 15 de agosto de 2026") o numéricas ("15/08/2026", "15-08-26", "15/AGO/2026", "2026-08-15").
@@ -115,6 +117,7 @@ Paso 4 — Año: si aparece con dos dígitos, expándalo usando el año de conte
 Paso 5 — Validación: verifique la existencia real de la fecha en el calendario (meses de 30 y 31 días, febrero y años bisiestos).
 Paso 6 — Contingencia en cascada: si la fecha de emisión es ilegible o inexistente, use la fecha del sello de recibido; si tampoco existe, use el 1 de enero del año de contexto.
 Formato de salida obligatorio: exactamente diez caracteres YYYY-MM-DD, con ceros a la izquierda, sin componente de hora y sin zona horaria.
+Nota — fecha_recepcion: los pasos 1 a 5 de este mismo algoritmo (localización, mes, ambigüedad día/mes, año, validación calendario) aplican igual al transcribir la fecha del sello de recibido al campo fecha_recepcion (sección 3.3). El paso 6 (contingencia en cascada) es EXCLUSIVO de fecha_emision: fecha_recepcion nunca recurre a una fecha de contingencia — ante sello ausente o ilegible, su valor es null (véase 2.9.e).
 
 [5. ÁRBOL DE DECISIÓN DE PROCEDENCIA (HCG vs AJENA)]
 Paso 1 — Identifique la ENTIDAD SUSCRIPTORA: la institución que encabeza el membrete y a nombre de la cual firma el suscriptor. La presencia aislada de logotipos o escudos no es suficiente: lo determinante es quién EMITE el documento.
@@ -132,7 +135,7 @@ Criterio de decisión: este indicador activa el proceso de anonimización poster
 Redacte el campo asunto como UN párrafo continuo de 1 a 3 líneas (entre 10 y 60 palabras), en tercera persona y tono administrativo neutro, sin comillas, sin viñetas y sin saltos de línea. Debe expresar: qué se comunica o solicita, quién lo promueve y, si existen, las referencias temporales o de expediente relevantes. Si el documento contiene una línea impresa de "Asunto", condésela conservando íntegro su sentido; si carece de ella, sintetice el cuerpo del documento.
 
 [7.5. UBICACIÓN VISUAL DE LOS CAMPOS (BOUNDING BOXES)]
-Además del objeto metadatos, reporte un objeto ubicaciones: para cada campo de metadatos que haya podido LOCALIZAR VISUALMENTE en una de las páginas adjuntas (numero_oficio, fecha_emision, dependencia_area, remitente_nombre, remitente_cargo, destinatario_nombre, destinatario_cargo, asunto, plazo_dias), indique el rectángulo delimitador que encierra ajustadamente ese texto de origen:
+Además del objeto metadatos, reporte un objeto ubicaciones: para cada campo de metadatos que haya podido LOCALIZAR VISUALMENTE en una de las páginas adjuntas (numero_oficio, fecha_emision, fecha_recepcion, dependencia_area, remitente_nombre, remitente_cargo, destinatario_nombre, destinatario_cargo, asunto, plazo_dias), indique el rectángulo delimitador que encierra ajustadamente ese texto de origen:
 a) pagina: número de página (1-indexado, en el mismo orden natural en que se adjuntaron las imágenes) donde aparece el texto.
 b) x0, y0: esquina superior izquierda del rectángulo, como fracción del ancho/alto de ESA página (0.0 = borde izquierdo/superior, 1.0 = borde derecho/inferior).
 c) x1, y1: esquina inferior derecha del rectángulo, en las mismas unidades fraccionarias (siempre x1 > x0 y y1 > y0).
@@ -143,8 +146,8 @@ Reglas:
 
 [8. RESTRICCIÓN DE FORMATO DE SALIDA — INNEGOCIABLE]
 8.1. Responda EXCLUSIVAMENTE con el objeto JSON del esquema solicitado (metadatos + ubicaciones). Queda prohibido todo texto previo o posterior, delimitadores de bloque de código, comentarios, notas de confianza, explicaciones o campos adicionales.
-8.2. Dentro de metadatos, emita SIEMPRE los once campos del esquema, en el orden definido, aunque deba recurrir a los valores de contingencia ("S/N", "NO ESPECIFICADO", "ILEGIBLE", null).
-8.3. Respete los tipos exactos: cadenas de texto sin saltos de línea; fecha_emision con el patrón YYYY-MM-DD; plazo_dias como entero o null; contiene_datos_sensibles como booleano; en ubicaciones, x0/y0/x1/y1 como números entre 0 y 1 y pagina como entero positivo.
+8.2. Dentro de metadatos, emita SIEMPRE los doce campos del esquema, en el orden definido, aunque deba recurrir a los valores de contingencia ("S/N", "NO ESPECIFICADO", "ILEGIBLE", null). fecha_recepcion es el único campo cuyo valor de ausencia es SIEMPRE null (nunca un placeholder textual): omítalo con null en vez de forzar una fecha cuando el sello no sea legible.
+8.3. Respete los tipos exactos: cadenas de texto sin saltos de línea; fecha_emision con el patrón YYYY-MM-DD; fecha_recepcion con el mismo patrón o null; plazo_dias como entero o null; contiene_datos_sensibles como booleano; en ubicaciones, x0/y0/x1/y1 como números entre 0 y 1 y pagina como entero positivo.
 8.4. No altere los nombres de las claves ni agregue claves nuevas a ninguno de los dos objetos.
 
 [9. INTEGRIDAD DOCUMENTAL — PROHIBICIÓN DE ALUCINACIÓN]
