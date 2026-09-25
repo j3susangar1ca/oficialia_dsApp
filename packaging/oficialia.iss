@@ -28,7 +28,13 @@
 ;     una página propia y las escribe directamente en el .env desplegado
 ;     (ver sección [Code]) — nadie tiene que abrir Notepad a mano. Si el
 ;     .env ya trae esas claves capturadas (reinstalación/actualización), la
-;     página se omite sola: no se vuelven a pedir.
+;     página se omite sola: no se vuelven a pedir — SALVO que el usuario
+;     elija lo contrario en la página "Datos de una instalación anterior"
+;     (ver PaginaModoInstalacion en [Code]), que solo aparece cuando ya hay
+;     datos de una instalación previa en esta PC y deja elegir entre
+;     conservarlos, borrar solo las credenciales (para volver a capturarlas)
+;     o hacer una instalación limpia (borra también la base de datos y los
+;     PDFs — pide confirmación explícita por lo destructivo de esa opción).
 ;   - AppId fijo entre versiones (no cambiar): así Inno Setup reconoce una
 ;     instalación anterior como ACTUALIZACIÓN en el mismo {app}, en vez de
 ;     instalar en paralelo. CloseApplications cierra la app anterior si
@@ -48,7 +54,7 @@
 ; ============================================================================
 
 #define MyAppName "Oficialía Digital DSA"
-#define MyAppVersion "1.1.1"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Hospital Civil de Guadalajara — División de Servicios Administrativos"
 #define MyAppExeName "OficialiaDigitalDSA.exe"
 #define MyDistDir "..\dist\OficialiaDigitalDSA"
@@ -178,8 +184,19 @@ Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Oficial�
 // ShouldSkipPage más abajo. Todo lo demás del .env (SMB, Sheets, timeouts…)
 // sigue siendo editable a mano desde el acceso directo "Configuración
 // avanzada (.env)" del menú Inicio.
+//
+// Antes de esa página va PaginaModoInstalacion: SOLO aparece si esta PC ya
+// tiene datos de una instalación anterior en {commonappdata} (BD, PDFs y/o
+// .env) y deja elegir entre conservarlos, borrar únicamente las credenciales
+// (para forzar que la página de arriba vuelva a pedirlas) o hacer una
+// instalación limpia (borra también la base de datos y los PDFs ya
+// procesados — irreversible, por eso pide confirmación aparte en
+// NextButtonClick). La opción por defecto es siempre "conservar todo": un
+// instalador de actualización nunca borra nada por sorpresa, es el usuario
+// quien tiene que elegirlo a propósito.
 // ============================================================================
 var
+  PaginaModoInstalacion: TInputOptionWizardPage;
   PaginaCredenciales: TInputQueryWizardPage;
   PaginaCuentaServicio: TInputFileWizardPage;
 
@@ -187,6 +204,10 @@ const
   IdxGeminiApiKey = 0;
   IdxRpaUsuario = 1;
   IdxRpaPassword = 2;
+
+  IdxModoConservarTodo = 0;
+  IdxModoSoloCredenciales = 1;
+  IdxModoInstalacionLimpia = 2;
 
 // Ruta del .env ya desplegado (o donde quedará tras [Files]) en esta PC.
 function RutaEnvDesplegado(): String;
@@ -265,7 +286,26 @@ end;
 
 procedure InitializeWizard();
 begin
-  PaginaCredenciales := CreateInputQueryPage(wpSelectComponents,
+  PaginaModoInstalacion := CreateInputOptionPage(wpSelectComponents,
+    'Datos de una instalación anterior',
+    'Esta PC ya tiene datos guardados de Oficialía Digital DSA',
+    'Se encontró una carpeta de datos previa en ' +
+    ExpandConstant('{commonappdata}\{#MyDataDirName}') + '. Elija qué ' +
+    'hacer con ella antes de continuar. Si no está seguro, deje la opción ' +
+    'recomendada: no se pierde nada.',
+    True, False);
+  PaginaModoInstalacion.Add(
+    'Conservar todo (recomendado) — no toca la base de datos ni los PDFs; ' +
+    'reutiliza las credenciales ya capturadas sin volver a pedirlas');
+  PaginaModoInstalacion.Add(
+    'Solo credenciales — vuelve a pedir la Gemini API key y la contraseña ' +
+    'de la Intranet; conserva intactas la base de datos y los PDFs');
+  PaginaModoInstalacion.Add(
+    'Instalación limpia — borra la base de datos, los PDFs y las ' +
+    'credenciales de esta PC; empieza completamente de cero');
+  PaginaModoInstalacion.SelectedValueIndex := IdxModoConservarTodo;
+
+  PaginaCredenciales := CreateInputQueryPage(PaginaModoInstalacion.ID,
     'Credenciales de esta instalación',
     'Se capturan una sola vez — no se le volverán a pedir',
     'Estos valores se guardan directamente en el .env de esta PC (' +
@@ -300,15 +340,66 @@ begin
     'Archivos JSON (*.json)|*.json|Todos los archivos (*.*)|*.*', '.json');
 end;
 
+// PaginaModoInstalacion solo tiene sentido si ya hay algo que conservar o
+// borrar: en una PC sin instalación previa se omite sola (no hay nada que
+// preguntar) y el flujo queda igual que antes de agregar esta página.
+//
 // Si esta PC ya tiene capturadas las credenciales esenciales (GEMINI_API_KEY
 // y RPA_PASSWORD) — de una instalación o reinstalación anterior — se omiten
-// ambas páginas: es exactamente el "no preguntar nunca más".
+// las páginas de credenciales/cuenta de servicio: es el "no preguntar nunca
+// más" de siempre. La excepción es que el usuario haya elegido en
+// PaginaModoInstalacion "solo credenciales" o "instalación limpia": ahí
+// NUNCA se omiten, sin importar lo que ya haya en el .env — es justo lo que
+// esas dos opciones piden.
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
+  if PageID = PaginaModoInstalacion.ID then
+  begin
+    Result := not DirExists(ExpandConstant('{commonappdata}\{#MyDataDirName}'));
+    Exit;
+  end;
   if (PageID = PaginaCredenciales.ID) or (PageID = PaginaCuentaServicio.ID) then
-    Result := (LeerValorEnv('GEMINI_API_KEY') <> '') and
+    Result := (PaginaModoInstalacion.SelectedValueIndex = IdxModoConservarTodo) and
+              (LeerValorEnv('GEMINI_API_KEY') <> '') and
               (LeerValorEnv('RPA_PASSWORD') <> '');
+end;
+
+// Confirmación extra al salir de PaginaModoInstalacion si el usuario eligió
+// "instalación limpia": es la única opción irreversible (borra la base de
+// datos y los PDFs ya procesados), así que además de estar descrita en la
+// propia página, se pide confirmar una vez más antes de dejarlo avanzar.
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = PaginaModoInstalacion.ID) and
+     (PaginaModoInstalacion.SelectedValueIndex = IdxModoInstalacionLimpia) then
+  begin
+    Result := MsgBox(
+      'Esto borrará PERMANENTEMENTE la base de datos, todos los PDFs de ' +
+      'oficios ya procesados y las credenciales guardadas en esta PC (' +
+      ExpandConstant('{commonappdata}\{#MyDataDirName}') + ').' + #13#13 +
+      '¿Confirma que quiere continuar con la instalación limpia?',
+      mbConfirmation, MB_YESNO) = IDYES;
+  end;
+end;
+
+// Al llegar a la página de credenciales tras elegir "solo credenciales" o
+// "instalación limpia", los campos deben verse vacíos (no los valores viejos
+// con los que InitializeWizard los prellenó al abrir el asistente, antes de
+// que el usuario eligiera el modo) — si no, parecería que no se está
+// pidiendo nada nuevo. GEMINI_API_KEY sigue prellenándose con el valor de
+// fábrica del instalador (DefaultGeminiApiKey) si lo trae: ese no es un dato
+// viejo de ESTA pc, es el que trae el instalador nuevo.
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = PaginaCredenciales.ID) and
+     (PaginaModoInstalacion.SelectedValueIndex <> IdxModoConservarTodo) then
+  begin
+    PaginaCredenciales.Values[IdxGeminiApiKey] := '{#DefaultGeminiApiKey}';
+    PaginaCredenciales.Values[IdxRpaUsuario] := '2010226';
+    PaginaCredenciales.Values[IdxRpaPassword] := '';
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -318,6 +409,29 @@ var
   I: Integer;
   JsonEnUnaLinea: String;
 begin
+  // ssInstall corre justo ANTES de que [Files]/[Dirs] copien/recreen nada —
+  // el momento correcto para aplicar el modo elegido en
+  // PaginaModoInstalacion sobre los datos de una instalación anterior. Los
+  // recrea todo lo necesario [Dirs] (permisos incluidos) y [Files] (plantilla
+  // .env "onlyifdoesntexist") que corren justo después de este paso.
+  if CurStep = ssInstall then
+  begin
+    case PaginaModoInstalacion.SelectedValueIndex of
+      IdxModoSoloCredenciales:
+        // Borra solo el .env (credenciales) — la base de datos y storage/
+        // viven en subcarpetas aparte y no se tocan. [Files] repone un .env
+        // en blanco desde la plantilla; el bloque de abajo (ssPostInstall)
+        // ya escribe ahí los valores nuevos capturados en el asistente.
+        if FileExists(RutaEnvDesplegado()) then
+          DeleteFile(RutaEnvDesplegado());
+      IdxModoInstalacionLimpia:
+        // Borra TODO {commonappdata}\OficialiaDigitalDSA: .env, base de
+        // datos SQLite y los PDFs/evidencia de oficios ya procesados.
+        // Irreversible — ya se confirmó aparte en NextButtonClick.
+        DelTree(ExpandConstant('{commonappdata}\{#MyDataDirName}'), True, True, True);
+    end;
+  end;
+
   if CurStep <> ssPostInstall then
     Exit;
 
