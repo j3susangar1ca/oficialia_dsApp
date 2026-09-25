@@ -452,27 +452,54 @@ def diferencia_metadatos(
 # ======================================================================
 
 class MetaEstado(BaseModel):
-    """Etiqueta y color de badge para cada estado (fuente única de la UI)."""
+    """Etiqueta, color e ícono de cada estado (fuente única de la UI).
+
+    `en_progreso` distingue los estados donde un proceso de fondo está
+    trabajando ACTIVAMENTE en el documento (preproceso, extracción,
+    registro RPA) de los que solo esperan una acción humana o ya son
+    finales — la bandeja y la revisión HITL usan esta bandera para decidir
+    dónde mostrar una barra de progreso animada en vez de un badge estático
+    (ver ui.layout.stepper_pipeline y ui.views_dashboard._fila_de_tabla)."""
     etiqueta: str
-    color: str      # color de Quasar para ui.badge
-    punto: str      # color sólido para indicadores
+    color: str          # color de Quasar para ui.badge
+    punto: str          # color sólido para indicadores
+    icono: str          # nombre de ícono Material (mismo set que ui.icon/Quasar)
+    en_progreso: bool = False
 
 
 META_ESTADOS: dict[EstadoDocumento, MetaEstado] = {
-    EstadoDocumento.INGESTADO: MetaEstado(etiqueta="En cola", color="grey-3", punto="slate"),
-    EstadoDocumento.EN_PREPROCESO: MetaEstado(etiqueta="Preprocesando", color="info", punto="sky"),
-    EstadoDocumento.EXTRAYENDO: MetaEstado(etiqueta="Extrayendo datos", color="info", punto="sky"),
-    EstadoDocumento.PENDIENTE_REVISION: MetaEstado(etiqueta="Por revisar", color="warning", punto="amber"),
-    EstadoDocumento.EJECUTANDO_RPA: MetaEstado(etiqueta="Registrando en Intranet", color="primary", punto="brand"),
-    EstadoDocumento.ERROR_RPA: MetaEstado(etiqueta="Error al registrar", color="negative", punto="rose"),
-    EstadoDocumento.COMPLETADO: MetaEstado(etiqueta="Completado", color="positive", punto="emerald"),
-    EstadoDocumento.DESCARTADO: MetaEstado(etiqueta="Descartado", color="grey-6", punto="slate"),
+    EstadoDocumento.INGESTADO: MetaEstado(
+        etiqueta="En cola", color="grey-3", punto="slate", icono="inbox"
+    ),
+    EstadoDocumento.EN_PREPROCESO: MetaEstado(
+        etiqueta="Preparando", color="info", punto="sky", icono="auto_fix_high", en_progreso=True
+    ),
+    EstadoDocumento.EXTRAYENDO: MetaEstado(
+        etiqueta="Extrayendo datos", color="info", punto="sky", icono="manage_search", en_progreso=True
+    ),
+    EstadoDocumento.PENDIENTE_REVISION: MetaEstado(
+        etiqueta="Por revisar", color="warning", punto="amber", icono="fact_check"
+    ),
+    EstadoDocumento.EJECUTANDO_RPA: MetaEstado(
+        etiqueta="Registrando en Intranet", color="primary", punto="brand", icono="cloud_upload", en_progreso=True
+    ),
+    EstadoDocumento.ERROR_RPA: MetaEstado(
+        etiqueta="Error al registrar", color="negative", punto="rose", icono="report"
+    ),
+    EstadoDocumento.COMPLETADO: MetaEstado(
+        etiqueta="Completado", color="positive", punto="emerald", icono="task_alt"
+    ),
+    EstadoDocumento.DESCARTADO: MetaEstado(
+        etiqueta="Descartado", color="grey-6", punto="slate", icono="folder_off"
+    ),
 }
 
 
 def meta_estado(estado: EstadoDocumento) -> MetaEstado:
     """Acceso seguro a la metadatura visual de un estado."""
-    return META_ESTADOS.get(estado, MetaEstado(etiqueta=estado.value, color="grey-6", punto="slate"))
+    return META_ESTADOS.get(
+        estado, MetaEstado(etiqueta=estado.value, color="grey-6", punto="slate", icono="help_outline")
+    )
 
 
 #: Grupos de la bandeja (filtros por pestaña, igual que el frontend original).

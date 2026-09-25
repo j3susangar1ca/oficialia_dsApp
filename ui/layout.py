@@ -25,6 +25,7 @@ from typing import Optional
 from nicegui import ui
 
 from config import Configuracion
+from core.models import EstadoDocumento
 from core.pipeline import FlujoDocumental
 
 # ----------------------------------------------------------------------
@@ -109,6 +110,171 @@ def aplicar_tema() -> None:
     """Colores base de Quasar + fondo de página, alineados a la identidad institucional."""
     ui.colors(primary=COLOR_PRIMARIO)
     ui.query("body").style(f"background:{COLOR_FONDO_PAGINA}")
+
+
+# ----------------------------------------------------------------------
+# Animaciones compartidas (progreso, pulso "en curso", insignia de alerta)
+# ----------------------------------------------------------------------
+# Una sola declaración global de keyframes/clases, reutilizada por el
+# stepper de fases (más abajo) Y por la barra de progreso animada que
+# ui.views_dashboard dibuja bajo el badge de estado de cada fila "en
+# progreso" (ver core.models.MetaEstado.en_progreso) — mismo lenguaje
+# visual de "esto sigue trabajando solo" en toda la app.
+# OJO `shared=True`: igual que en ui.views_dashboard, este módulo se
+# importa una sola vez al arrancar (antes de que exista ningún cliente
+# conectado), así que sin `shared=True` el <style> nunca llega al <head>
+# real de ninguna página.
+ui.add_head_html(
+    """
+    <style>
+      @keyframes oficialia-shimmer {
+        0%   { transform: translateX(-120%); }
+        100% { transform: translateX(220%); }
+      }
+      @keyframes oficialia-pulso-anillo {
+        0%   { box-shadow: 0 0 0 0 rgba(2,132,199,.32); }
+        70%  { box-shadow: 0 0 0 7px rgba(2,132,199,0); }
+        100% { box-shadow: 0 0 0 0 rgba(2,132,199,0); }
+      }
+      @keyframes oficialia-pulso-anillo-alerta {
+        0%   { box-shadow: 0 0 0 0 rgba(225,29,72,.35); }
+        70%  { box-shadow: 0 0 0 7px rgba(225,29,72,0); }
+        100% { box-shadow: 0 0 0 0 rgba(225,29,72,0); }
+      }
+      /* Barra fina "aún trabajando" bajo un badge de estado. */
+      .oficialia-barra-progreso {
+        position: relative; overflow: hidden; height: 3px; width: 100%;
+        border-radius: 3px; background: #e0f2fe; margin-top: 4px;
+      }
+      .oficialia-barra-progreso::after {
+        content: ""; position: absolute; inset: 0; width: 35%;
+        background: linear-gradient(90deg, transparent, #0284c7, transparent);
+        animation: oficialia-shimmer 1.35s ease-in-out infinite;
+      }
+      /* Nodo del stepper de fases (ui.layout.stepper_pipeline). */
+      .oficialia-paso-circulo {
+        width: 32px; height: 32px; border-radius: 999px; flex: none;
+        display: flex; align-items: center; justify-content: center;
+        border: 2px solid #e2e8f0; background: #fff; position: relative;
+      }
+      .oficialia-paso-actual { animation: oficialia-pulso-anillo 1.9s ease-out infinite; }
+      .oficialia-paso-alerta { animation: oficialia-pulso-anillo-alerta 1.6s ease-out infinite; }
+      /* Insignia flotante "!" — el mismo lenguaje visual para el nodo del
+         stepper en ERROR_RPA y para cualquier otro contador que necesite
+         gritar "esto necesita que lo veas". */
+      .oficialia-exclamacion {
+        position: absolute; top: -5px; right: -5px; width: 16px; height: 16px;
+        border-radius: 999px; background: #e11d48; color: #fff;
+        font-size: 11px; font-weight: 800; line-height: 16px; text-align: center;
+        box-shadow: 0 0 0 2px #fff; animation: oficialia-pulso-anillo-alerta 1.6s ease-out infinite;
+      }
+    </style>
+    """,
+    shared=True,
+)
+
+
+# ----------------------------------------------------------------------
+# Stepper de fases del pipeline — "¿en qué parte del proceso está esto?"
+# ----------------------------------------------------------------------
+#: Camino feliz de 6 fases (estado, etiqueta corta, ícono Material). El
+#: orden importa: define qué nodos se pintan "hechos" (a la izquierda del
+#: actual) vs. "pendientes" (a la derecha).
+_PASOS_STEPPER: list[tuple[EstadoDocumento, str, str]] = [
+    (EstadoDocumento.INGESTADO, "Recibido", "inbox"),
+    (EstadoDocumento.EN_PREPROCESO, "Preparando", "auto_fix_high"),
+    (EstadoDocumento.EXTRAYENDO, "Extrayendo datos", "manage_search"),
+    (EstadoDocumento.PENDIENTE_REVISION, "Por revisar", "fact_check"),
+    (EstadoDocumento.EJECUTANDO_RPA, "Registrando", "cloud_upload"),
+    (EstadoDocumento.COMPLETADO, "Completado", "task_alt"),
+]
+
+
+def stepper_pipeline(estado_actual: EstadoDocumento) -> None:
+    """
+    Barra horizontal de 6 fases: de un vistazo, dónde está este documento
+    en el proceso y qué falta — para que el revisor nunca tenga que
+    adivinar "¿esto en qué paso va?" mirando solo un badge de texto.
+
+    DESCARTADO es una salida FUERA de este camino (el banner de
+    `_banner_estado` ya lo explica con su motivo) — no dibuja stepper.
+    ERROR_RPA se dibuja sobre el nodo "Registrando" con una insignia "!"
+    flotante y un pulso rojo en vez del anillo azul de progreso normal:
+    sigue siendo esa misma fase, solo que quedó pausada esperando
+    atención humana antes de continuar (ver ui.views_hitl._banner_estado
+    y la acción "Confirmar registro manual").
+    """
+    if estado_actual == EstadoDocumento.DESCARTADO:
+        return
+
+    es_error = estado_actual == EstadoDocumento.ERROR_RPA
+    # COMPLETADO es terminal: nada sigue "en curso", así que el último nodo
+    # se pinta como hecho (check verde), no como el anillo azul pulsante de
+    # "actual" — ese pulso significa "esto sigue trabajando o te espera a
+    # ti", y para un documento ya completado sería un falso "aún falta algo".
+    terminado = estado_actual == EstadoDocumento.COMPLETADO
+    if es_error:
+        indice_actual = next(
+            i for i, (e, _, _) in enumerate(_PASOS_STEPPER) if e == EstadoDocumento.EJECUTANDO_RPA
+        )
+    else:
+        indice_actual = next(
+            (i for i, (e, _, _) in enumerate(_PASOS_STEPPER) if e == estado_actual),
+            len(_PASOS_STEPPER) - 1,
+        )
+
+    piezas: list[str] = []
+    for i, (_estado, etiqueta, icono) in enumerate(_PASOS_STEPPER):
+        hecho = i < indice_actual or (terminado and i == indice_actual)
+        actual = i == indice_actual and not terminado
+
+        if actual and es_error:
+            clase = "oficialia-paso-circulo oficialia-paso-alerta"
+            estilo = "border-color:#fb7185;background:#fff1f2;color:#e11d48"
+            insignia = '<span class="oficialia-exclamacion" aria-hidden="true">!</span>'
+            icono_nodo = icono
+        elif actual:
+            clase = "oficialia-paso-circulo oficialia-paso-actual"
+            estilo = "border-color:#38bdf8;background:#f0f9ff;color:#0284c7"
+            insignia = ""
+            icono_nodo = icono
+        elif hecho:
+            clase = "oficialia-paso-circulo"
+            estilo = "border-color:#10b981;background:#10b981;color:#fff"
+            insignia = ""
+            icono_nodo = "check"
+        else:
+            clase = "oficialia-paso-circulo"
+            estilo = "border-color:#e2e8f0;background:#fff;color:#cbd5e1"
+            insignia = ""
+            icono_nodo = icono
+
+        color_texto = "#0f172a" if (actual or hecho) else "#94a3b8"
+        peso_texto = "700" if actual else "500"
+
+        piezas.append(
+            f'<div style="display:flex;flex-direction:column;align-items:center;gap:5px;'
+            f'flex:0 0 auto;min-width:78px;">'
+            f'<div class="{clase}" style="{estilo}">'
+            f'<span class="material-icons" style="font-size:16px;" aria-hidden="true">{icono_nodo}</span>'
+            f"{insignia}"
+            f"</div>"
+            f'<span style="font-size:10.5px;font-weight:{peso_texto};color:{color_texto};'
+            f'text-align:center;white-space:nowrap;">{etiqueta}</span>'
+            f"</div>"
+        )
+        if i < len(_PASOS_STEPPER) - 1:
+            color_linea = "#10b981" if i < indice_actual else "#e2e8f0"
+            piezas.append(
+                f'<div style="flex:1;height:2px;background:{color_linea};'
+                f'margin-top:16px;min-width:10px;"></div>'
+            )
+
+    ui.html(
+        '<div style="display:flex;align-items:flex-start;width:100%;padding:4px 6px 0;">'
+        + "".join(piezas)
+        + "</div>"
+    ).classes("w-full")
 
 
 # ----------------------------------------------------------------------
