@@ -129,6 +129,17 @@ def _validar_fecha_recepcion(valor: str) -> Optional[str]:
     return None
 
 
+def _validar_hora_recepcion(valor: str) -> Optional[str]:
+    """Hora del sello (HH:MM, 24 h); vacío permitido (sello sin hora legible)."""
+    from core.models import normalizar_hora
+
+    try:
+        normalizar_hora(valor)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
 def _validar_obligatorio(valor: str) -> Optional[str]:
     if not valor.strip():
         return "Campo obligatorio"
@@ -598,6 +609,12 @@ def _panel_formulario(
                 "Fecha de Recepción — sello (YYYY-MM-DD)",
                 placeholder="2026-09-02 (vacío si no hay sello legible)",
                 validador=_validar_fecha_recepcion,
+            )
+            _campo(
+                "hora_recepcion",
+                "Hora de Recepción — sello (HH:MM, 24 h)",
+                placeholder="10:35 (vacío si el sello no trae hora legible)",
+                validador=_validar_hora_recepcion,
             )
 
             with ui.row().classes("w-full items-center gap-4 no-wrap"):
@@ -1263,6 +1280,7 @@ def _precargar_borrador(documento: DocumentoRegistro) -> dict[str, Any]:
             "numero_oficio": "",
             "fecha_emision": "",
             "fecha_recepcion": "",
+            "hora_recepcion": "",
             "procedencia": "Ajena",
             "dependencia_area": "",
             "remitente_nombre": "",
@@ -1277,6 +1295,7 @@ def _precargar_borrador(documento: DocumentoRegistro) -> dict[str, Any]:
         "numero_oficio": fuente.numero_oficio,
         "fecha_emision": fuente.fecha_emision,
         "fecha_recepcion": fuente.fecha_recepcion or "",
+        "hora_recepcion": fuente.hora_recepcion or "",
         "procedencia": fuente.procedencia.value,
         "dependencia_area": fuente.dependencia_area,
         "remitente_nombre": fuente.remitente_nombre,
