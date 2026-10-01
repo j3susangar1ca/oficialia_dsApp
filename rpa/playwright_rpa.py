@@ -864,31 +864,90 @@ class RpaIntranet:
         except ErrorRpa:
             pass
 
-    def _seleccionar_combo_por_texto(self, marco, view_id: str, texto: str) -> None:
-        """Búsqueda difusa por value/label en el combo y selección por id."""
+    _JS_BUSCAR_OPCION_COMBO = """
+([id, searchText]) => {
+  const w = window.webix;
+  const control = w && typeof w.$$ === 'function' ? w.$$(id) : null;
+  const list = control?.getList?.();
+  if (!control || !list || typeof list.find !== 'function') return { ok: false, total: 0 };
+  const norm = (v) => String(v ?? '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
+    .toUpperCase().replace(/[^A-Z0-9 ]+/g, ' ').replace(/\\s+/g, ' ').trim();
+  const sinCodigo = (v) => String(v ?? '').replace(/^\\s*\\(?\\d*\\)?\\s*/, '');
+  const raw = String(searchText ?? '');
+  const codigo = (raw.match(/\\((\\d+)\\)/) || [])[1];
+  const target = norm(sinCodigo(raw));
+  const items = list.find(() => true);
+  let best = null, bestScore = 0;
+  for (const it of items) {
+    const texto = norm(sinCodigo(it.value ?? it.label ?? ''));
+    let score = 0;
+    if (codigo && String(it.id) === codigo) score = 100;
+    else if (target && texto === target) score = 90;
+    else if (target && texto && (texto.includes(target) || target.includes(texto))) {
+      score = 50 + 40 * Math.min(texto.length, target.length) / Math.max(texto.length, target.length);
+    } else if (target) {
+      const a = new Set(target.split(' ').filter((t) => t.length > 2));
+      const b = new Set(texto.split(' ').filter((t) => t.length > 2));
+      const comun = [...a].filter((t) => b.has(t)).length;
+      if (a.size && comun) score = 40 * comun / Math.max(a.size, b.size);
+    }
+    if (score > bestScore) { bestScore = score; best = it; }
+  }
+  if (best && bestScore >= 45) {
+    control.setValue(best.id);
+    return { ok: true, total: items.length, id: best.id, value: best.value ?? best.label, score: bestScore };
+  }
+  return { ok: false, total: items.length };
+}
+"""
+
+    def _seleccionar_combo_por_texto(self, marco, view_id: str, texto: str) -> bool:
+        """
+        Selecciona en un combo Webix la opción que mejor coincide con `texto`.
+
+        El combo 'dependen' (Procedencia) carga su catálogo de forma diferida
+        (suggest): se fuerza open()/close() y se espera a que la lista tenga
+        datos antes de buscar. La coincidencia ignora acentos/mayúsculas, el
+        prefijo "(código)" y acepta código exacto, texto exacto, contención o
+        traslape de palabras. Devuelve True si se fijó una opción del catálogo.
+        """
         try:
             marco.evaluate(
-                "([id, searchText]) => {"
-                "  const w = window.webix;"
-                "  if (!w || typeof w.$$ !== 'function') return;"
-                "  const control = w.$$(id);"
-                "  if (!control) return;"
-                "  const normalize = (v) => String(v ?? '').toUpperCase();"
-                "  const target = normalize(searchText);"
-                "  const list = control.getList?.();"
-                "  if (list && typeof list.find === 'function') {"
-                "    const match = list.find((item) => {"
-                "      const value = normalize(item?.value); const label = normalize(item?.label);"
-                "      return value.includes(target) || label.includes(target);"
-                "    });"
-                "    if (match?.id) { control.setValue(match.id); return; }"
-                "  }"
-                "  control.setValue(searchText);"
+                "([id]) => {"
+                "  const c = window.webix?.$$(id);"
+                "  if (c && typeof c.open === 'function') { c.open(); }"
+                "  if (c && typeof c.close === 'function') { c.close(); }"
                 "}",
-                [view_id, texto],
+                [view_id],
             )
+            self._esperar_con_reintentos(
+                marco,
+                "([id]) => !!window.webix?.$$(id)?.getList?.()?.getFirstData?.()",
+                descripcion=f"catálogo del combo '{view_id}'",
+                timeout_ms=self.config.rpa_selector_timeout_ms,
+                reintentos=3,
+                arg=[view_id],
+            )
+        except Exception:  # noqa: BLE001 — se intenta buscar de todos modos
+            pass
+
+        try:
+            resultado = marco.evaluate(self._JS_BUSCAR_OPCION_COMBO, [view_id, texto]) or {}
         except Exception as exc:  # noqa: BLE001
             logger.warning("Combo Webix '%s' no pudo fijarse por texto: %s", view_id, exc)
+            return False
+
+        if resultado.get("ok"):
+            logger.info(
+                "[RPA] Combo '%s' ← (%s) %s", view_id, resultado.get("id"), resultado.get("value"),
+            )
+            return True
+        logger.warning(
+            "[RPA] Combo '%s': sin coincidencia para %r (%s opciones cargadas). "
+            "Configure RPA_HCG_DEPENDENCIA_CVE o corrija la dependencia en la revisión HITL.",
+            view_id, texto, resultado.get("total", 0),
+        )
+        return False
 
     # ------------------------------------------------------------------
     # Subida del PDF canónico
