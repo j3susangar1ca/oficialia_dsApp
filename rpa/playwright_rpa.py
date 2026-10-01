@@ -870,32 +870,19 @@ class RpaIntranet:
   const control = w && typeof w.$$ === 'function' ? w.$$(id) : null;
   const list = control?.getList?.();
   if (!control || !list || typeof list.find !== 'function') return { ok: false, total: 0 };
-  const norm = (v) => String(v ?? '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
-    .toUpperCase().replace(/[^A-Z0-9 ]+/g, ' ').replace(/\\s+/g, ' ').trim();
-  const sinCodigo = (v) => String(v ?? '').replace(/^\\s*\\(?\\d*\\)?\\s*/, '');
-  const raw = String(searchText ?? '');
-  const codigo = (raw.match(/\\((\\d+)\\)/) || [])[1];
-  const target = norm(sinCodigo(raw));
+  const buscado = String(searchText ?? '').trim();
+  const codigo = (buscado.match(/^\\((\\d*)\\)/) || [])[1];
   const items = list.find(() => true);
-  let best = null, bestScore = 0;
-  for (const it of items) {
-    const texto = norm(sinCodigo(it.value ?? it.label ?? ''));
-    let score = 0;
-    if (codigo && String(it.id) === codigo) score = 100;
-    else if (target && texto === target) score = 90;
-    else if (target && texto && (texto.includes(target) || target.includes(texto))) {
-      score = 50 + 40 * Math.min(texto.length, target.length) / Math.max(texto.length, target.length);
-    } else if (target) {
-      const a = new Set(target.split(' ').filter((t) => t.length > 2));
-      const b = new Set(texto.split(' ').filter((t) => t.length > 2));
-      const comun = [...a].filter((t) => b.has(t)).length;
-      if (a.size && comun) score = 40 * comun / Math.max(a.size, b.size);
-    }
-    if (score > bestScore) { bestScore = score; best = it; }
-  }
-  if (best && bestScore >= 45) {
-    control.setValue(best.id);
-    return { ok: true, total: items.length, id: best.id, value: best.value ?? best.label, score: bestScore };
+  // Coincidencia literal con el catálogo: código, texto completo "(código) nombre" o nombre.
+  const match = items.find((it) => {
+    const nombre = String(it.value ?? it.label ?? '').trim();
+    return String(it.id) === buscado
+      || (codigo && String(it.id) === codigo)
+      || nombre === buscado;
+  });
+  if (match) {
+    control.setValue(match.id);
+    return { ok: true, total: items.length, id: match.id, value: match.value ?? match.label };
   }
   return { ok: false, total: items.length };
 }
@@ -907,9 +894,9 @@ class RpaIntranet:
 
         El combo 'dependen' (Procedencia) carga su catálogo de forma diferida
         (suggest): se fuerza open()/close() y se espera a que la lista tenga
-        datos antes de buscar. La coincidencia ignora acentos/mayúsculas, el
-        prefijo "(código)" y acepta código exacto, texto exacto, contención o
-        traslape de palabras. Devuelve True si se fijó una opción del catálogo.
+        datos antes de buscar. La coincidencia es literal, sin normalizar: el
+        texto debe ser tal cual aparece en el catálogo (id/código, "(código)
+        nombre" o nombre). Devuelve True si se fijó una opción del catálogo.
         """
         try:
             marco.evaluate(
