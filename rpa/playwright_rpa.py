@@ -680,7 +680,10 @@ class RpaIntranet:
         # Intranet — en vez de dejar el campo obligatorio del formulario vacío.
         fecha_recepcion = self._parsear_fecha(metadatos.fecha_recepcion) if metadatos.fecha_recepcion else ahora
         self._asignar_webix(marco, "fech_rece", _formatear_fecha(fecha_recepcion))
-        self._asignar_webix(marco, "hora_rece", _formatear_hora(ahora))
+        # hora_rece: hora exacta del sello si se extrajo; si no, la del registro.
+        self._asignar_webix(
+            marco, "hora_rece", metadatos.hora_recepcion or _formatear_hora(ahora),
+        )
         self._asignar_webix(marco, "nume_ofic", metadatos.numero_oficio)
 
         # Limpieza de ligados por si la sesión arrastra valores previos.

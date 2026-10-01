@@ -34,6 +34,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 #: Caracteres prohibidos en folios/nombres de archivo (igual que el original).
 CARACTERES_RESERVADOS_RE = re.compile(r"[/\\:*?\"<>|]")
 PATRON_FECHA_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+PATRON_HORA = re.compile(r"^(\d{1,2}):(\d{2})(?::\d{2})?$")
+
+
+def normalizar_hora(valor: Any) -> Optional[str]:
+    """'H:MM'/'HH:MM'/'HH:MM:SS' → 'HH:MM' (24 h); vacío/None → None; inválida → ValueError."""
+    if valor is None:
+        return None
+    valor = valor.strip() if isinstance(valor, str) else valor
+    if not valor:
+        return None
+    coincide = PATRON_HORA.match(str(valor))
+    if not coincide or int(coincide.group(1)) > 23 or int(coincide.group(2)) > 59:
+        raise ValueError("Formato de hora requerido: HH:MM (24 h, o vacío/null si no es legible)")
+    return f"{int(coincide.group(1)):02d}:{coincide.group(2)}"
 
 
 def ahora_utc_iso() -> str:
@@ -139,9 +153,9 @@ ESTADOS_PENDIENTES: frozenset[EstadoDocumento] = frozenset({EstadoDocumento.PEND
 class MetadatosOficio(BaseModel):
     """
     Metadatos estructurados extraídos del oficio (contrato de la IA y del
-    formulario de revisión asistida). De los 12 campos, 11 son obligatorios
+    formulario de revisión asistida). De los 13 campos, 11 son obligatorios
     en la salida (valores de contingencia si no hay evidencia); fecha_
-    recepcion es el único genuinamente opcional (null): depende de que el
+    recepcion y hora_recepcion son los únicos genuinamente opcionales (null): depende de que el
     documento traiga un sello de recibido legible, cosa que no siempre
     ocurre. Los validadores aplican la normalización de dominio original.
     """
@@ -162,6 +176,13 @@ class MetadatosOficio(BaseModel):
     fecha_recepcion: Optional[str] = Field(
         default=None,
         description="Fecha de recepción según el sello de la Oficialía (YYYY-MM-DD) o null",
+    )
+    #: Hora EXACTA de recepción asentada en el sello (HH:MM, 24 h). `None` si
+    #: el sello no la trae o es ilegible; nunca se infiere (el RPA recurre
+    #: entonces a la hora del registro).
+    hora_recepcion: Optional[str] = Field(
+        default=None,
+        description="Hora de recepción según el sello de la Oficialía (HH:MM, 24 h) o null",
     )
     #: Origen institucional del documento.
     procedencia: Procedencia = Field(..., description="'HCG' o 'Ajena'")
@@ -229,6 +250,11 @@ class MetadatosOficio(BaseModel):
         except ValueError as exc:
             raise ValueError("La fecha de recepción no es una fecha calendario válida") from exc
         return valor
+
+    @field_validator("hora_recepcion", mode="before")
+    @classmethod
+    def _validar_hora_recepcion(cls, valor: Any) -> Optional[str]:
+        return normalizar_hora(valor)
 
     @field_validator("dependencia_area", "remitente_nombre", "destinatario_nombre")
     @classmethod
@@ -302,6 +328,7 @@ class UbicacionesCampos(BaseModel):
     numero_oficio: Optional[CampoUbicacion] = None
     fecha_emision: Optional[CampoUbicacion] = None
     fecha_recepcion: Optional[CampoUbicacion] = None
+    hora_recepcion: Optional[CampoUbicacion] = None
     dependencia_area: Optional[CampoUbicacion] = None
     remitente_nombre: Optional[CampoUbicacion] = None
     remitente_cargo: Optional[CampoUbicacion] = None
